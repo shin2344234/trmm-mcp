@@ -6,12 +6,12 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
-from . import config, observability
+from . import __version__, config, observability
 
 
 class TrmmError(RuntimeError):
@@ -41,7 +41,7 @@ def _normalize_path(path: str) -> str:
 def _audit(method: str, path: str, body: Any, outcome: str) -> None:
     """Append to the dedicated mutation log, and to the unified event stream."""
     entry = {
-        "time": datetime.now(timezone.utc).isoformat(),
+        "time": datetime.now(UTC).isoformat(),
         "mode": config.MODE,
         "method": method,
         "path": path,
@@ -70,7 +70,7 @@ class TrmmClient:
                 headers={
                     "X-API-KEY": config.API_KEY,
                     "Content-Type": "application/json",
-                    "User-Agent": "trmm-mcp/1.0",
+                    "User-Agent": f"trmm-mcp/{__version__}",
                 },
                 # Connect/write/pool stay short, but the read phase must outlast
                 # the longest tool timeout: TRMM holds the connection open for

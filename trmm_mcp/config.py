@@ -51,10 +51,14 @@ if not API_URL:
     raise ConfigError("TRMM_API_URL is not set (e.g. https://api.example.com)")
 
 _READONLY_KEY = os.environ.get("TRMM_READONLY_API_KEY", "").strip()
-_COMMAND_KEY = os.environ.get("TRMM_COMMAND_API_KEY", "").strip()
+_COMMAND_KEY = (
+    os.environ.get("TRMM_COMMAND_API_KEY", "").strip()
+    if MODE in (ELEVATE, COMMAND)
+    else ""
+)
 
-# The command key is never loaded in read-only mode, so a compromised or
-# confused read-only process has no path to an execution-capable credential.
+# The command key is never retained in this module in read-only mode, so the
+# HTTP client has no path to an execution-capable credential.
 #
 # In elevate mode both keys are held, but reads still go out under the
 # read-only key - only an approved execution is allowed to use the command key.
@@ -103,7 +107,7 @@ HTTP_READ_TIMEOUT = float(
 TRANSPORT = os.environ.get("TRMM_MCP_TRANSPORT", "stdio").strip().lower()
 if TRANSPORT in ("http", "streamable_http"):
     TRANSPORT = "streamable-http"
-if TRANSPORT not in ("stdio", "streamable-http", "sse"):
+if TRANSPORT not in ("stdio", "streamable-http"):
     raise ConfigError(f"TRMM_MCP_TRANSPORT must be stdio or streamable-http, got {TRANSPORT!r}")
 
 # Bind to loopback by default: the listener has no authentication of its own,

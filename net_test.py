@@ -52,7 +52,7 @@ async def main():
                 time.sleep(0.25)
         check(f"listening on {HOST}:{PORT}", up)
         if not up:
-            return
+            raise SystemExit(1)
 
         # No credentials at all
         r = httpx.post(URL, verify=VERIFY, json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},

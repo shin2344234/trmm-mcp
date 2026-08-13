@@ -66,7 +66,7 @@ def main():
                 time.sleep(0.25)
         check("server up", up)
         if not up:
-            return
+            raise SystemExit(1)
 
         r = httpx.get(f"{BASE}/approve/", timeout=5, verify=VERIFY)
         check("page asks for password and code",
@@ -123,8 +123,6 @@ def main():
                   "Too many failed attempts" in r.text)
 
         # An unauthenticated request must not be able to approve anything.
-        from trmm_mcp import elevation
-        os.environ["TRMM_MCP_STATE_DIR"] = "/tmp/trmm-authtest-state"
         r = httpx.post(f"{BASE}/approve/approve/anything", timeout=5, verify=VERIFY)
         check("cannot approve without signing in",
               "Sign in" in r.text or r.status_code in (303, 401, 403),

@@ -178,7 +178,7 @@ Three independent layers, each sufficient on its own:
    were bypassed. That key gets 403 on `POST /agents/<id>/cmd/`, `/runscript/`,
    `/reboot/` and `/wol/`.
 
-The command key is not even loaded into the process in read-only mode.
+The MCP client does not retain or use the command key in read-only mode.
 
 ### One honest caveat about layer 3
 
@@ -728,7 +728,7 @@ Every tool carries MCP hints (`readOnlyHint` / `destructiveHint` /
 `idempotentHint` / `openWorldHint`) so a *client* can reason about safety on its
 own — colour a destructive tool, refuse to auto-run one — independent of the
 approval gate. They're advisory; the real enforcement is still the out-of-band
-gate. The classification lives in one table in `server.py`
+gate. The classification lives in two small sets in `server.py`
 (`_DESTRUCTIVE_TOOLS` / `_SAFE_WRITE_TOOLS`), applied after registration, so
 adding a tool means adding one line there, not editing a decorator.
 
@@ -767,7 +767,7 @@ All settings are environment variables, read from `.env` in this directory
 | `TRMM_MCP_PUBLIC_URL` | derived | Approval URL shown to the user |
 | `TRMM_MCP_STATE_DIR` | `./state` | Where grants are persisted |
 | `TRMM_READONLY_API_KEY` | — | Key used in read-only mode |
-| `TRMM_COMMAND_API_KEY` | — | Key used in command mode only |
+| `TRMM_COMMAND_API_KEY` | — | Key used for executions in `elevate` and `command` modes |
 | `TRMM_MCP_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
 | `TRMM_MCP_HTTP_HOST` / `_PORT` / `_PATH` | `127.0.0.1` / `8770` / `/mcp` | HTTP listener |
 | `TRMM_MCP_MAX_RESPONSE_CHARS` | `60000` | Truncation cap per tool result |

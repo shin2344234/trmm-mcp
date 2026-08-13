@@ -62,7 +62,7 @@ def stop(proc):
     time.sleep(1)
 
 
-async def probe(session, label):
+async def probe(session):
     """Call a tool with a hard timeout so a hang fails fast instead of stalling."""
     try:
         res = await asyncio.wait_for(session.call_tool("trmm_server_info", {}), timeout=20)
@@ -82,13 +82,13 @@ async def scenario(stateless: bool):
         async with streamable_http_client(URL, http_client=http_client) as (r, w):
             async with ClientSession(r, w) as session:
                 await asyncio.wait_for(session.initialize(), timeout=20)
-                ok, detail = await probe(session, "before")
+                ok, detail = await probe(session)
                 check(f"{name}: works before restart", ok, detail)
 
                 stop(proc)
                 proc2 = start(stateless)
 
-                ok, detail = await probe(session, "after")
+                ok, detail = await probe(session)
                 if stateless:
                     check(f"{name}: still works after a server restart", ok, detail)
                 else:

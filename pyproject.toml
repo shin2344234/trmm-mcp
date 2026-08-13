@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,12 @@ version = "1.0.0"
 description = "An MCP server for TacticalRMM, with an out-of-band human approval gate for privileged actions."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "AGPL-3.0-or-later" }
+license = "AGPL-3.0-or-later"
 authors = [{ name = "Walker Computers" }]
 keywords = ["mcp", "tacticalrmm", "rmm", "model-context-protocol", "claude"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3.11",
     "Topic :: System :: Systems Administration",
 ]
@@ -23,6 +22,7 @@ classifiers = [
 # is API-incompatible with 1.x, so this is a floor AND a ceiling on the major.
 dependencies = [
     "mcp==2.0.0",
+    "mcp-types==2.0.0",
     "httpx==0.28.1",
     "starlette==1.3.1",
     "uvicorn==0.52.1",
@@ -32,7 +32,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/shin2344234/trmm-mcp"
-Documentation = "https://github.com/shin2344234/trmm-mcp/blob/main/README.md"
+Documentation = "https://github.com/shin2344234/trmm-mcp/blob/master/README.md"
 
 [project.scripts]
 trmm-mcp = "trmm_mcp.server:main"

@@ -16,7 +16,7 @@ from typing import Any
 
 from mcp.server import MCPServer
 
-from . import config, elevation, observability
+from . import __version__, config, elevation, observability
 from .client import TrmmError, client
 
 observability.setup()
@@ -42,7 +42,7 @@ dedicated tool.
 
 server = MCPServer(
     name="tacticalrmm",
-    version="1.0.0",
+    version=__version__,
     instructions=INSTRUCTIONS,
     middleware=[observability.logging_middleware],
 )
@@ -152,7 +152,7 @@ async def _resolve_agent(identifier: str) -> str:
     raise TrmmError(f"No agent matches {identifier!r}. Use trmm_list_agents to see them.")
 
 
-async def _enforce_agent_scope(agent_id: str, _unused: str = "") -> None:
+async def _enforce_agent_scope(agent_id: str) -> None:
     """Check the allowlist against the RESOLVED agent, never the typed input.
 
     Matching on what the caller typed is both too strict and too loose: an
@@ -774,7 +774,6 @@ if config.EXEC_TOOLS_ENABLED:
                 "target": agent,
                 "risk": RISK_DISRUPTIVE,
                 "code": command,
-                "code_language": shell,
                 "facts": [
                     ["Shell", shell_name],
                     ["Runs as", _runs_as(run_as_user)],
@@ -1040,8 +1039,8 @@ _DESTRUCTIVE_TOOLS = {
 }
 # Execution tools that are safe to repeat / not destructive.
 _SAFE_WRITE_TOOLS = {
-    "trmm_wake_on_lan": True,   # idempotent: waking an awake machine is a no-op
-    "trmm_run_checks": True,    # idempotent: just re-runs existing checks
+    "trmm_wake_on_lan",  # idempotent: waking an awake machine is a no-op
+    "trmm_run_checks",  # idempotent: just re-runs existing checks
 }
 
 

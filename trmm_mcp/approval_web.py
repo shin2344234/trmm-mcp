@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import html
 import json
-import re
 import time
 from typing import Any
 
@@ -101,7 +100,6 @@ button { font: inherit; padding: .5rem 1.1rem; border-radius: 7px;
 .approve { background: var(--low); color: #fff; border-color: transparent;
            font-weight: 600; }
 .req.sev-high .approve, .req.sev-unknown .approve { background: var(--high); }
-.deny { }
 form { display: inline; margin: 0; }
 .hint { font-size: .78rem; color: var(--dim); }
 
@@ -213,7 +211,7 @@ def _request_card(record: dict[str, Any]) -> str:
         f'<form method="post" action="approve/{request_id}">'
         f'<button class="approve">Approve once</button></form>'
         f'<form method="post" action="deny/{request_id}">'
-        f'<button class="deny">Deny</button></form>'
+        f'<button>Deny</button></form>'
         f'<span class="hint">Runs once, then locks again.</span>'
         f"</div>"
     )
@@ -331,16 +329,10 @@ async def login(request: Request):
     return response
 
 
-async def logout(request: Request):
+async def logout(_request: Request):
     response = RedirectResponse(url=".", status_code=303)
     response.delete_cookie(COOKIE)
     return response
-
-
-def _describe(record: dict[str, Any]) -> str:
-    params = record.get("params") or {}
-    lines = [f"{k} = {json.dumps(v, default=str)}" for k, v in sorted(params.items())]
-    return "\n".join(lines)
 
 
 def _duration(seconds: float) -> str:
@@ -378,8 +370,8 @@ async def index(request: Request):
         else f"{count} operation{'' if count == 1 else 's'} waiting for approval"
     )
     parts = [
-        f"<h1>{headline}</h1>"
-        f"<p class='meta'>TacticalRMM · mode: {html.escape(config.MODE)}</p>"
+        f"<h1>{headline}</h1>",
+        f"<p class='meta'>TacticalRMM · mode: {html.escape(config.MODE)}</p>",
     ]
 
     if not pending:
@@ -431,7 +423,7 @@ async def index(request: Request):
     if pending or approved or windows:
         parts.append(
             "<h2>Panic button</h2><form method='post' action='revoke'>"
-            "<button class='deny'>Cancel everything above</button></form>"
+            "<button>Cancel everything above</button></form>"
         )
 
     auth_note = (
@@ -439,7 +431,7 @@ async def index(request: Request):
     )
     parts.append(
         f"<h2>Session</h2><p class='meta'>Signed in with {auth_note}.</p>"
-        "<form method='post' action='logout'><button class='deny'>Sign out</button>"
+        "<form method='post' action='logout'><button>Sign out</button>"
         "</form>"
     )
 
