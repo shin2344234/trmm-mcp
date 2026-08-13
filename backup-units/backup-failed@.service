@@ -1,0 +1,11 @@
+[Unit]
+Description=Record that %i failed
+
+[Service]
+Type=oneshot
+User=root
+# A backup that silently stops running is the classic way to discover you have
+# no backups at the worst possible moment. This drops a breadcrumb the
+# heartbeat check below can see, and shouts in the journal.
+ExecStart=/bin/sh -c 'printf "%%s FAILED: %i\\n" "$(date -Is)" >> /rmmbackups/BACKUP-FAILURES.log'
+ExecStart=/usr/bin/logger -p daemon.err -t backup "BACKUP FAILED: %i"

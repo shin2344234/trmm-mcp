@@ -1,0 +1,34 @@
+# --- secrets and live state: NEVER commit these ---------------------------
+.env
+.env.*
+!.env.example
+.backup-passphrase
+certs/
+state/
+logs/
+command-audit.log
+
+# --- python ----------------------------------------------------------------
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- editor / os -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# stray runtime logs at repo root
+*.log
+
+# backup archives (contain .env/certs/state — never track)
+mcp-backup-*.tar.zst
+mcp-backup-*.tar.zst.gpg
+*.sha256

@@ -1,0 +1,13 @@
+[Unit]
+Description=TacticalRMM MCP server backup (.env, certs, state, code)
+OnFailure=backup-failed@%n.service
+
+[Service]
+Type=oneshot
+# Root so it can read .env (mode 600) and write into root-owned /rmmbackups.
+User=root
+ExecStart=/opt/trmm-mcp/backup-mcp.sh --auto
+ExecStartPost=/bin/sh -c 'date -Is > /rmmbackups/LAST_SUCCESS_mcp'
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=600

@@ -1,0 +1,477 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Browser approval page for pending privileged operations.
+
+Deliberately plain: no external assets, no JS frameworks, one form per action.
+The point is that a human reads the exact command and clicks a button, in a
+channel the model has no way to reach.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import re
+import time
+from typing import Any
+
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, RedirectResponse
+
+from . import approval_auth, config, elevation, observability, render
+
+COOKIE = "trmm_mcp_approval"
+
+STYLE = """
+:root {
+  color-scheme: light dark;
+  --line: #8884; --dim: #8889; --panel: #8881;
+  --high: #b42318; --mid: #9a6700; --low: #1a7f37;
+}
+* { box-sizing: border-box; }
+body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+       max-width: 54rem; margin: 1.5rem auto 4rem; padding: 0 1rem; line-height: 1.5; }
+h1 { font-size: 1.35rem; margin: 0 0 .2rem; }
+h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
+     color: var(--dim); margin: 2.2rem 0 .6rem; }
+a { color: inherit; }
+
+/* --- request card --- */
+.req { border: 1px solid var(--line); border-radius: 10px; margin: 1rem 0;
+       overflow: hidden; }
+.req-top { padding: .9rem 1rem .8rem; }
+.sev { display: inline-block; font-size: .68rem; font-weight: 700;
+       letter-spacing: .09em; padding: .2rem .5rem; border-radius: 4px;
+       border: 1.5px solid currentColor; margin-bottom: .5rem; }
+.sev-high { color: var(--high); }
+.sev-mid { color: var(--mid); }
+.sev-low { color: var(--low); }
+.sev-unknown { color: var(--high); border-style: dashed; }
+.req.sev-high { border-color: var(--high); border-left-width: 5px; }
+.req.sev-unknown { border-color: var(--high); border-left-width: 5px;
+                   border-left-style: dashed; }
+.req.sev-mid { border-left: 5px solid var(--mid); }
+.req.sev-low { border-left: 5px solid var(--low); }
+.title { font-size: 1.12rem; font-weight: 620; margin: 0; }
+.target { font-size: 1.12rem; margin: .1rem 0 0; }
+.target b { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-weight: 700; }
+.alert { margin: .7rem 0 0; padding: .5rem .7rem; border-radius: 6px;
+         background: color-mix(in srgb, var(--high) 12%, transparent);
+         border: 1px solid color-mix(in srgb, var(--high) 45%, transparent);
+         font-size: .9rem; }
+.when { font-size: .82rem; color: var(--dim); margin-top: .6rem; }
+
+/* --- facts --- */
+table.facts { width: 100%; border-collapse: collapse; margin: .8rem 0 0;
+              font-size: .9rem; }
+table.facts th { text-align: left; font-weight: 500; color: var(--dim);
+                 padding: .22rem .8rem .22rem 0; white-space: nowrap;
+                 vertical-align: top; width: 1%; }
+table.facts td { padding: .22rem 0; word-break: break-word; }
+
+/* --- verbatim evidence --- */
+.evidence { margin: .9rem 1rem 0; border: 1px solid var(--line);
+            border-radius: 8px; overflow: hidden; }
+.evhead { display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline;
+          justify-content: space-between; padding: .4rem .6rem;
+          background: var(--panel); font-size: .8rem; font-weight: 600; }
+.evtag { font-weight: 400; color: var(--dim); font-size: .72rem; }
+.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: .84rem; overflow-x: auto; padding: .4rem 0; }
+.ln { display: flex; white-space: pre; }
+.num { flex: 0 0 2.6rem; text-align: right; padding-right: .8rem;
+       color: var(--dim); user-select: none; position: sticky; left: 0;
+       background: inherit; }
+.src { white-space: pre; padding-right: 1rem; }
+.ctl { background: var(--high); color: #fff; border-radius: 2px;
+       padding: 0 .1rem; font-size: .78em; }
+.evfoot { padding: .3rem .6rem; font-size: .74rem; color: var(--dim);
+          border-top: 1px solid var(--line); }
+ul.notices { margin: 0; padding: .5rem .6rem .5rem 1.8rem; font-size: .82rem;
+             border-top: 1px solid var(--line);
+             background: color-mix(in srgb, var(--mid) 10%, transparent); }
+ul.notices li { margin: .15rem 0; }
+
+/* --- actions --- */
+.actions { display: flex; flex-wrap: wrap; gap: .6rem; padding: .9rem 1rem 1rem;
+           align-items: center; }
+button { font: inherit; padding: .5rem 1.1rem; border-radius: 7px;
+         border: 1px solid var(--line); cursor: pointer; min-height: 2.6rem;
+         background: transparent; color: inherit; }
+.approve { background: var(--low); color: #fff; border-color: transparent;
+           font-weight: 600; }
+.req.sev-high .approve, .req.sev-unknown .approve { background: var(--high); }
+.deny { }
+form { display: inline; margin: 0; }
+.hint { font-size: .78rem; color: var(--dim); }
+
+/* --- misc --- */
+.card { border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem;
+        margin: .7rem 0; }
+.meta { color: var(--dim); font-size: .84rem; }
+.empty { color: var(--dim); font-style: italic; }
+.warn { border-left: 3px solid var(--high); padding-left: .8rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+input[type=password], input[type=text], input[type=number] {
+  font: inherit; padding: .55rem; border-radius: 7px;
+  border: 1px solid var(--line); background: transparent; color: inherit;
+  min-height: 2.6rem; }
+input[type=number] { width: 5.5rem; }
+@media (max-width: 30rem) {
+  .actions button { flex: 1 1 100%; }
+  .num { flex-basis: 2rem; }
+}
+"""
+
+COUNTDOWN_JS = """
+(function () {
+  function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
+  function tick() {
+    var now = Date.now() / 1000;
+    document.querySelectorAll('[data-expires]').forEach(function (el) {
+      var left = Math.max(0, Math.round(el.dataset.expires - now));
+      if (left <= 0) { el.textContent = 'expired'; el.classList.add('gone'); return; }
+      el.textContent = left < 60
+        ? 'expires in ' + plural(left, 'second')
+        : 'expires in ' + plural(Math.round(left / 60), 'minute');
+    });
+  }
+  tick();
+  setInterval(tick, 1000);
+  // Refresh so newly requested approvals appear, unless something is being typed.
+  setInterval(function () {
+    var a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'BUTTON')) return;
+    location.reload();
+  }, 20000);
+})();
+"""
+
+
+def _page(title: str, body: str, script: bool = False) -> HTMLResponse:
+    tail = f"<script>{COUNTDOWN_JS}</script>" if script else ""
+    return HTMLResponse(
+        f"<!doctype html><html><head><meta charset='utf-8'>"
+        f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{html.escape(title)}</title><style>{STYLE}</style></head>"
+        f"<body>{body}{tail}</body></html>"
+    )
+
+
+def _request_card(record: dict[str, Any]) -> str:
+    """One pending operation, rendered to be understood at a glance."""
+    display = record.get("display") or {}
+    params = record.get("params") or {}
+    word, sev_class = render.severity(record)
+
+    action = display.get("action")
+    target = display.get("target")
+
+    if action:
+        heading = (
+            f'<p class="title">{html.escape(str(action))}</p>'
+            + (f'<p class="target">on <b>{html.escape(str(target))}</b></p>'
+               if target else "")
+        )
+    else:
+        # No display metadata: an older record, or one we failed to describe.
+        heading = (
+            f'<p class="title">{html.escape(str(record.get("tool", "unknown tool")))}</p>'
+            f'<p class="target">{html.escape(str(record.get("summary", "")))}</p>'
+        )
+
+    blocks = [f'<div class="req-top"><span class="sev {sev_class}">{word}</span>',
+              heading]
+
+    if not display:
+        blocks.append(
+            '<p class="alert">This request carries no description, so it could '
+            'not be classified. Read the raw parameters below before approving.</p>'
+        )
+    elif display.get("warning"):
+        blocks.append(f'<p class="alert">{html.escape(str(display["warning"]))}</p>')
+
+    facts = list(display.get("facts") or [])
+    if not display:
+        facts = [[k, json.dumps(v, default=str)] for k, v in sorted(params.items())]
+    blocks.append(render.facts_table(facts))
+
+    expires = float(record.get("expires", 0))
+    blocks.append(
+        f'<p class="when">Requested {html.escape(_ago(float(record.get("created", 0))))}'
+        f' · <span data-expires="{expires:.0f}">expires in '
+        f'{html.escape(_duration(expires - time.time()))}</span></p></div>'
+    )
+
+    code = display.get("code")
+    if code:
+        blocks.append(render.code_block(str(code), "Exact command to be run"))
+
+    request_id = html.escape(str(record.get("id", "")))
+    blocks.append(
+        f'<div class="actions">'
+        f'<form method="post" action="approve/{request_id}">'
+        f'<button class="approve">Approve once</button></form>'
+        f'<form method="post" action="deny/{request_id}">'
+        f'<button class="deny">Deny</button></form>'
+        f'<span class="hint">Runs once, then locks again.</span>'
+        f"</div>"
+    )
+
+    return f'<div class="req {sev_class}">{"".join(blocks)}</div>'
+
+
+def _client(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _authed(request: Request) -> bool:
+    cookie = request.cookies.get(COOKIE)
+    if approval_auth.is_configured():
+        return approval_auth.valid_session(cookie)
+    # Not yet configured: fall back to the bearer token so the page still works.
+    if not config.AUTH_TOKEN:
+        return True
+    return cookie == config.AUTH_TOKEN
+
+
+def _login_page(message: str = "", locked: int = 0) -> HTMLResponse:
+    warn = f"<p class='warn'>{html.escape(message)}</p>" if message else ""
+
+    if locked > 0:
+        return _page(
+            "TRMM MCP approvals",
+            f"<h1>TRMM MCP approvals</h1>"
+            f"<p class='warn'>Too many failed attempts. Try again in {locked}s.</p>",
+        )
+
+    if approval_auth.is_configured():
+        fields = (
+            "<p><input type='password' name='password' autofocus "
+            "placeholder='Password' autocomplete='current-password'></p>"
+            "<p><input type='text' name='code' placeholder='6-digit code' "
+            "inputmode='numeric' pattern='[0-9]*' autocomplete='one-time-code'></p>"
+        )
+        blurb = "<p>Sign in to review operations waiting for approval.</p>"
+    else:
+        fields = (
+            "<p><input type='password' name='token' autofocus "
+            "placeholder='TRMM_MCP_AUTH_TOKEN'></p>"
+        )
+        blurb = (
+            "<p>Enter the server token.</p>"
+            "<p class='warn'>No password or second factor is configured. Run "
+            "<code>setup_approval_auth.py</code> on the server to protect this page "
+            "properly - right now it shares a secret with every MCP client.</p>"
+        )
+
+    return _page(
+        "TRMM MCP approvals",
+        f"<h1>TRMM MCP approvals</h1>{warn}{blurb}"
+        f"<form method='post' action='login'>{fields}"
+        "<button class='approve'>Sign in</button></form>",
+    )
+
+
+async def login(request: Request):
+    who = _client(request)
+    locked = approval_auth.locked_for(who)
+    if locked:
+        observability.event("approval_login", result="locked-out", client=who)
+        return _login_page(locked=locked)
+
+    form = await request.form()
+
+    if approval_auth.is_configured():
+        password = str(form.get("password", ""))
+        code = str(form.get("code", ""))
+        ok_password = approval_auth.verify_password(
+            password, config.APPROVAL_PASSWORD_HASH
+        )
+        step = approval_auth.check_totp(code)
+        ok_code = step is not None
+        if not (ok_password and ok_code):
+            approval_auth.note_failure(who)
+            observability.event(
+                "approval_login", result="rejected", client=who,
+                # Recorded for triage; never shown to whoever is trying.
+                password_ok=ok_password, code_ok=ok_code,
+            )
+            return _login_page(
+                "Incorrect password or code.", locked=approval_auth.locked_for(who)
+            )
+        # Both factors are good: spend the code so it cannot be reused.
+        approval_auth.consume_totp(step)
+        approval_auth.note_success(who)
+        observability.event("approval_login", result="accepted", client=who)
+        response = RedirectResponse(url=".", status_code=303)
+        response.set_cookie(
+            COOKIE,
+            approval_auth.issue_session(),
+            httponly=True,
+            samesite="strict",
+            secure=config.TLS_ENABLED,
+            max_age=config.APPROVAL_SESSION_SECONDS,
+        )
+        return response
+
+    token = str(form.get("token", ""))
+    if config.AUTH_TOKEN and token != config.AUTH_TOKEN:
+        approval_auth.note_failure(who)
+        observability.event("approval_login", result="rejected-token", client=who)
+        return _login_page("That token was not correct.",
+                           locked=approval_auth.locked_for(who))
+    approval_auth.note_success(who)
+    observability.event("approval_login", result="accepted-token", client=who)
+    response = RedirectResponse(url=".", status_code=303)
+    response.set_cookie(
+        COOKIE, config.AUTH_TOKEN, httponly=True, samesite="strict",
+        secure=config.TLS_ENABLED, max_age=86400,
+    )
+    return response
+
+
+async def logout(request: Request):
+    response = RedirectResponse(url=".", status_code=303)
+    response.delete_cookie(COOKIE)
+    return response
+
+
+def _describe(record: dict[str, Any]) -> str:
+    params = record.get("params") or {}
+    lines = [f"{k} = {json.dumps(v, default=str)}" for k, v in sorted(params.items())]
+    return "\n".join(lines)
+
+
+def _duration(seconds: float) -> str:
+    """'9 minutes', '45 seconds' - readable, not '583s'."""
+    seconds = int(max(0, seconds))
+    if seconds < 60:
+        return f"{seconds} second{'' if seconds == 1 else 's'}"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'' if minutes == 1 else 's'}"
+    hours = minutes // 60
+    remainder = minutes % 60
+    text = f"{hours} hour{'' if hours == 1 else 's'}"
+    return f"{text} {remainder} min" if remainder else text
+
+
+def _ago(timestamp: float) -> str:
+    delta = time.time() - timestamp
+    return "just now" if delta < 5 else f"{_duration(delta)} ago"
+
+
+async def index(request: Request):
+    if not _authed(request):
+        return _login_page()
+
+    state = elevation.snapshot()
+    pending = [p for p in state["pending"] if p["status"] == "pending"]
+    approved = [p for p in state["pending"] if p["status"] == "approved"]
+    windows = state["windows"]
+    now = time.time()
+
+    count = len(pending)
+    headline = (
+        "Nothing is waiting for you." if not count
+        else f"{count} operation{'' if count == 1 else 's'} waiting for approval"
+    )
+    parts = [
+        f"<h1>{headline}</h1>"
+        f"<p class='meta'>TacticalRMM · mode: {html.escape(config.MODE)}</p>"
+    ]
+
+    if not pending:
+        parts.append(
+            "<p class='empty'>When the assistant asks to change something, it "
+            "will appear here.</p>"
+        )
+    for record in pending:
+        parts.append(_request_card(record))
+
+    if approved:
+        parts.append("<h2>Approved · waiting for the assistant to run it</h2>")
+        for record in approved:
+            display = record.get("display") or {}
+            what = display.get("action") or record.get("summary", "")
+            target = display.get("target")
+            parts.append(
+                f"<div class='card'><strong>{html.escape(str(what))}</strong>"
+                + (f" on <code>{html.escape(str(target))}</code>" if target else "")
+                + "<p class='meta'>Single use — it stops working once it runs, "
+                  "or when it expires.</p></div>"
+            )
+
+    parts.append("<h2>Standing permission</h2>")
+    if not windows:
+        parts.append(
+            "<p class='empty'>None — every execution needs approving one at a time.</p>"
+        )
+    for window in windows:
+        uses = window.get("uses_left")
+        scope = window.get("agent") or "any machine"
+        parts.append(
+            f"<div class='card'><strong>Anything may run without asking</strong>"
+            f"<p class='meta'>"
+            f"<span data-expires='{float(window['expires']):.0f}'>expires in "
+            f"{html.escape(_duration(window['expires'] - now))}</span> &middot; "
+            f"{'unlimited uses' if uses is None else f'{uses} use(s) left'} &middot; "
+            f"{html.escape(scope)}</p></div>"
+        )
+
+    parts.append(
+        "<p class='meta'>Skip individual approvals for a burst of work:</p>"
+        "<form method='post' action='window'>"
+        "<input type='number' name='minutes' value='10' min='1' max='60'> minutes, "
+        "<input type='number' name='uses' value='5' min='1' max='50'> uses "
+        "<button>Allow without asking</button></form>"
+    )
+
+    if pending or approved or windows:
+        parts.append(
+            "<h2>Panic button</h2><form method='post' action='revoke'>"
+            "<button class='deny'>Cancel everything above</button></form>"
+        )
+
+    auth_note = (
+        "password + 2FA" if approval_auth.is_configured() else "shared token only"
+    )
+    parts.append(
+        f"<h2>Session</h2><p class='meta'>Signed in with {auth_note}.</p>"
+        "<form method='post' action='logout'><button class='deny'>Sign out</button>"
+        "</form>"
+    )
+
+    return _page("TRMM MCP approvals", "".join(parts), script=True)
+
+
+async def approve(request: Request):
+    if not _authed(request):
+        return _login_page()
+    elevation.approve(request.path_params["request_id"])
+    return RedirectResponse(url="../", status_code=303)
+
+
+async def deny(request: Request):
+    if not _authed(request):
+        return _login_page()
+    elevation.deny(request.path_params["request_id"])
+    return RedirectResponse(url="../", status_code=303)
+
+
+async def window(request: Request):
+    if not _authed(request):
+        return _login_page()
+    form = await request.form()
+    minutes = int(str(form.get("minutes", "10")) or 10)
+    uses = int(str(form.get("uses", "5")) or 5)
+    elevation.open_window(minutes * 60, uses=uses)
+    return RedirectResponse(url=".", status_code=303)
+
+
+async def revoke(request: Request):
+    if not _authed(request):
+        return _login_page()
+    elevation.revoke_all()
+    return RedirectResponse(url=".", status_code=303)

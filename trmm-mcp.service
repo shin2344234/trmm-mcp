@@ -1,0 +1,82 @@
+[Unit]
+Description=TacticalRMM MCP server (elevate-on-approval, HTTPS)
+After=network.target rmm.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rmmuser
+Group=rmmuser
+WorkingDirectory=/opt/trmm-mcp
+
+# Credentials (TRMM API keys, bearer token, approval password + TOTP) come
+# from .env, which this unit only ever reads.
+EnvironmentFile=/opt/trmm-mcp/.env
+# elevate = read freely; every execution needs your out-of-band approval.
+# Use readonly for a hard guarantee, command for unattended automation.
+Environment=TRMM_MCP_MODE=elevate
+Environment=TRMM_MCP_TRANSPORT=streamable-http
+Environment=TRMM_MCP_HTTP_HOST=192.0.2.10
+Environment=TRMM_MCP_HTTP_PORT=8770
+Environment=TRMM_MCP_TLS=true
+# The URL handed to the assistant when something needs approving; must be what
+# the operator's browser can actually reach.
+Environment=TRMM_MCP_PUBLIC_URL=https://192.0.2.10:8770
+# The code tree is read-only below, so don't try to write .pyc files into it.
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+ExecStart=/opt/trmm-mcp/venv/bin/python -m trmm_mcp.server
+Restart=always
+RestartSec=10s
+
+# ---------------------------------------------------------------------------
+# Hardening. This process holds credentials that can run commands as SYSTEM on
+# every managed machine, so it gets the narrowest environment it can still work
+# in. Check with:  systemd-analyze security trmm-mcp
+# ---------------------------------------------------------------------------
+
+# Filesystem: everything read-only except the three things it actually writes.
+ProtectSystem=strict
+ReadWritePaths=/opt/trmm-mcp/state
+ReadWritePaths=/opt/trmm-mcp/logs
+ReadWritePaths=/opt/trmm-mcp/command-audit.log
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProcSubset=pid
+UMask=0077
+
+# Privileges: it binds a port above 1024 and needs no capabilities at all.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RemoveIPC=true
+
+# Kernel surface.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+# Network: TCP/UDP over IP and unix sockets only.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Egress fence: it only ever talks to the local TRMM API and serves the LAN.
+# It has no reason to reach the internet, and this stops it doing so.
+# Remove these two lines if you ever point TRMM_API_URL at a remote host.
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=192.0.2.0/24
+
+[Install]
+WantedBy=multi-user.target

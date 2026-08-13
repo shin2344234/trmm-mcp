@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the TacticalRMM backup nightly
+
+[Timer]
+# 02:15, with jitter so it does not collide with other nightly jobs.
+OnCalendar=*-*-* 02:15:00
+RandomizedDelaySec=20m
+# If the box was off at 02:15, run once it comes back rather than skipping.
+Persistent=true
+Unit=trmm-backup.service
+
+[Install]
+WantedBy=timers.target

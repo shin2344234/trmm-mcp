@@ -1,0 +1,18 @@
+[Unit]
+Description=TacticalRMM full backup (Postgres, MeshCentral, certs, configs)
+Documentation=https://docs.tacticalrmm.com/backup/
+After=postgresql.service
+OnFailure=backup-failed@%n.service
+
+[Service]
+Type=oneshot
+# backup.sh dumps both Postgres databases and tars /meshcentral, /opt/tactical
+# and /etc/conf.d, so it needs root. It shells out to sudo internally, which is
+# a no-op when already root.
+User=root
+ExecStart=/rmm/backup.sh --auto
+ExecStartPost=/bin/sh -c 'date -Is > /rmmbackups/LAST_SUCCESS_trmm'
+# Dumping two databases and taring MeshCentral is IO-heavy; be polite about it.
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3600
