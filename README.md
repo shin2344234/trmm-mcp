@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.shin2344234/trmm-mcp -->
+
 # TacticalRMM MCP server
 
 Lets an AI assistant read everything in your TacticalRMM install, and — when
