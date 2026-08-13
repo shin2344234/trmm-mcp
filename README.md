@@ -1,9 +1,48 @@
 # TacticalRMM MCP server
 
-Lets Claude read everything in your TacticalRMM install — and, when you
-explicitly switch it on, run commands on your managed machines.
+Lets an AI assistant read everything in your TacticalRMM install, and — when
+you explicitly switch it on — run commands on your managed machines.
 
-Built and verified against **TRMM 1.5.1** on `rmm-server`. The API itself is
+Ask "which machines are offline and why", "what's eating memory on the front
+desk PC", "show me every failed check this week", and get answers from live
+fleet data. Turn on `elevate` mode and the assistant can also fix things, but
+only after you approve each action yourself.
+
+## What you get
+
+**28 tools.** 20 read-only ones covering agents, checks, alerts, services,
+processes, event logs, software inventory, patches, scripts and audit history;
+8 execution tools for running commands and scripts, rebooting, controlling
+services, killing processes, and waking machines.
+
+**A full audit trail of everything.** Every inbound request, every tool call
+with its arguments, every result, every TRMM API call, every approval decision
+and every refusal is written to a structured JSONL log with credential
+redaction and rotation. For a bridge that can run commands as SYSTEM across a
+fleet, knowing exactly who asked for what and when is not optional — so it is
+on by default and cannot be silently skipped. Details in
+[Audit logging](#audit-logging).
+
+**An approval gate the model cannot reach.** In `elevate` mode an execution is
+refused until you approve that exact call in a browser (password + TOTP) or
+from a shell on the server. Approvals are bound to a fingerprint of the
+arguments, are single-use, and expire. No tool exists that grants elevation.
+
+**Read-only that actually holds.** Three independent layers: the execution
+tools are never registered, the HTTP client refuses non-read requests, and the
+API key itself is bound to a TRMM role with no execution permissions.
+
+**Built for real fleets.** TRMM has no pagination and returns whole tables —
+one agent detail call measured 192 KB here. Responses are projected, capped and
+truncated with an explicit notice, so a single call cannot swallow the model's
+context.
+
+**HTTPS with bearer auth**, a self-signed certificate carrying an IP SAN, and a
+hardened systemd unit. Clients trust that one certificate rather than skipping
+verification.
+
+Works with Claude Code, Claude Desktop and LM Studio on macOS, Windows and
+Linux. Built and verified against **TRMM 1.5.1**. The TRMM API itself is
 documented independently in [TRMM-API.md](TRMM-API.md).
 
 ---
@@ -164,175 +203,326 @@ To re-provision or rotate keys:
 /rmm/api/env/bin/python /opt/trmm-mcp/provision_trmm_accounts.py --rotate
 ```
 
-## Connecting Claude
+## Running the server
 
-### Same machine (stdio)
-
-```bash
-claude mcp add trmm -- /opt/trmm-mcp/run.sh
-```
-
-Or in a project's `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "trmm": {
-      "command": "/opt/trmm-mcp/run.sh",
-      "args": ["readonly"]
-    }
-  }
-}
-```
-
-Swap `"readonly"` for `"command"` to enable execution. Keeping two entries
-(`trmm` and `trmm-command`) makes the active capability obvious at a glance.
-
-### Claude Desktop on Windows (over the network) — recommended
-
-Claude Desktop's built-in "custom connector" UI **cannot** reach this server.
-Remote connectors are brokered by Anthropic, so the connection originates from
-their datacenter rather than your workstation, and a private address like
-`192.0.2.10` is unroutable from there. `claude_desktop_config.json` is also
-stdio-only — it has no `url` field.
-
-The working path is `mcp-remote`, a small Node bridge that Desktop launches
-locally and which speaks HTTP to this server.
-
-1. **On this server**, run the HTTP listener as a service:
-
-   ```bash
-   sudo cp /opt/trmm-mcp/trmm-mcp.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now trmm-mcp
-   ```
-
-   It binds `192.0.2.10:8770` and requires the bearer token from `.env`.
-
-2. **On the workstation**, edit `claude_desktop_config.json`:
-
-   First copy the certificate to the workstation so Node can verify the server:
-
-   ```powershell
-   scp rmmuser@192.0.2.10:/opt/trmm-mcp/certs/cert.pem $env:USERPROFILE\trmm-mcp-cert.pem
-   ```
-
-   ```json
-   {
-     "mcpServers": {
-       "tacticalrmm": {
-         "command": "cmd",
-         "args": [
-           "/c", "npx", "-y", "mcp-remote@latest",
-           "https://192.0.2.10:8770/mcp",
-           "--transport", "http-only",
-           "--header", "Authorization:${AUTH_HEADER}"
-         ],
-         "env": {
-           "AUTH_HEADER": "Bearer <TRMM_MCP_AUTH_TOKEN from .env>",
-           "NODE_EXTRA_CA_CERTS": "C:\\Users\\YOU\\trmm-mcp-cert.pem"
-         }
-       }
-     }
-   }
-   ```
-
-   Details that are each load-bearing on Windows:
-   - `cmd /c npx` — `npx` is a `.cmd` shim that Electron often cannot spawn directly.
-   - `Authorization:${AUTH_HEADER}` with the value in `env` — Claude Desktop on
-     Windows does not escape spaces inside `args`, which splits a literal
-     `Bearer xyz` into stray arguments. mcp-remote expands `${VAR}` itself.
-     No space after the colon.
-   - `NODE_EXTRA_CA_CERTS` — trusts this one certificate. Prefer it over
-     `NODE_TLS_REJECT_UNAUTHORIZED=0`, which turns off verification for
-     everything that process touches.
-
-3. Quit Claude Desktop completely (system-tray icon → Quit) and reopen.
-
-Verify the bridge outside Desktop first if it misbehaves:
+Install the systemd unit and start it:
 
 ```bash
-npx -p mcp-remote@latest mcp-remote-client http://192.0.2.10:8770/mcp --allow-http --transport http-only --header "Authorization: Bearer <token>"
+sudo cp /opt/trmm-mcp/trmm-mcp.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now trmm-mcp
 ```
 
-**If Desktop ignores your config**, you are probably on the MSIX build, which
-reads a virtualized path. The real files live under
-`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\` — both
-`claude_desktop_config.json` and `logs\`. The "Edit Config" button opens the
-un-virtualized `%APPDATA%` copy, which the app may never read.
-
-### Alternative: Claude Desktop over SSH (no open port)
-
-Instead of the HTTP listener, Desktop can run the stdio server across SSH.
-Nothing is exposed on the network and SSH keys do the auth.
-
-1. Confirm passwordless SSH from the workstation:
-
-   ```powershell
-   ssh -o BatchMode=yes rmmuser@192.0.2.10 "echo OK"
-   ```
-
-   If it prints `OK` with no prompt, you're set. Otherwise create and install a key:
-
-   ```powershell
-   ssh-keygen -t ed25519 -C "claude-desktop"
-   type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh rmmuser@192.0.2.10 "cat >> ~/.ssh/authorized_keys"
-   ```
-
-2. **Settings → Developer → Edit Config** (or edit
-   `%APPDATA%\Claude\claude_desktop_config.json`):
-
-   ```json
-   {
-     "mcpServers": {
-       "tacticalrmm": {
-         "command": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
-         "args": [
-           "-T",
-           "-o", "BatchMode=yes",
-           "-o", "StrictHostKeyChecking=accept-new",
-           "rmmuser@192.0.2.10",
-           "/opt/trmm-mcp/run.sh readonly"
-         ]
-       }
-     }
-   }
-   ```
-
-   `-T` is required — a pseudo-TTY would corrupt the JSON-RPC stream. `BatchMode`
-   makes a missing key fail fast instead of hanging on a password prompt Claude
-   Desktop cannot answer.
-
-3. Quit Claude Desktop **completely** (right-click the system-tray icon → Quit;
-   closing the window leaves it running) and reopen it.
-
-Verified on this server: launching under a minimal environment from a different
-working directory still handshakes cleanly, and `~/.bashrc` has the standard
-non-interactive guard, so nothing pollutes the protocol stream.
-
-### From another machine (HTTP)
+It serves HTTPS on port 8770 by default and requires the bearer token from
+`.env`. To run it in the foreground instead, for a quick test:
 
 ```bash
 /opt/trmm-mcp/run.sh readonly http
 ```
 
-listens on `127.0.0.1:8770/mcp`. To run it permanently:
-
-```bash
-sudo cp /opt/trmm-mcp/trmm-mcp.service /etc/systemd/system/ && sudo systemctl enable --now trmm-mcp
-```
-
-The listener runs **stateless** (`TRMM_MCP_STATELESS_HTTP=true`, the default).
-This matters: with stateful streamable HTTP the server hands out a session id
-that dies with the process, so restarting the service leaves any connected
-client replaying a session the server has forgotten. Through `mcp-remote` that
-shows up as tool calls hanging for minutes and then failing, while `tools/list`
-still answers — with `Rejected request with unknown or expired session ID` in
-`logs/server.log`. Stateless removes the failure mode entirely; we use no
+The listener runs stateless (`TRMM_MCP_STATELESS_HTTP=true`, the default). This
+matters: with stateful streamable HTTP the server hands out a session id that
+dies with the process, so restarting the service leaves any connected client
+replaying a session the server has forgotten. Through `mcp-remote` that shows up
+as tool calls hanging for minutes and then failing, while `tools/list` still
+answers, with `Rejected request with unknown or expired session ID` in
+`logs/server.log`. Stateless removes the failure mode; we use no
 server-initiated requests, so it costs nothing. `restart_test.py` proves both
 behaviours.
 
-**The bearer token is the only authentication** — anything that can reach
-the port with it inherits this server's TRMM permissions. Keep it on loopback and put a
-Cloudflare Tunnel with Access in front of it rather than binding `0.0.0.0`.
+The bearer token is the only authentication on that port, so anything that can
+reach it inherits this server's TRMM permissions. Keep it on the LAN or behind a
+tunnel rather than binding a public interface.
+
+## Connecting a client
+
+Claude Code, Claude Desktop and LM Studio are covered below, each on macOS,
+Windows and Linux. Whichever you use, you need two things from the server: the
+**bearer token** from `.env`, and a copy of **`certs/cert.pem`** so the client
+can verify the TLS certificate.
+
+Copy the certificate over first.
+
+macOS and Linux:
+
+```bash
+scp rmmuser@192.0.2.10:/opt/trmm-mcp/certs/cert.pem ~/trmm-mcp-cert.pem
+```
+
+Windows (PowerShell):
+
+```powershell
+scp rmmuser@192.0.2.10:/opt/trmm-mcp/certs/cert.pem $env:USERPROFILE\trmm-mcp-cert.pem
+```
+
+### Claude Code — macOS, Windows, Linux
+
+The simplest of the three, because Claude Code speaks HTTP directly and needs no
+bridge:
+
+```bash
+claude mcp add --transport http trmm https://192.0.2.10:8770/mcp \
+  --header "Authorization: Bearer <TRMM_MCP_AUTH_TOKEN>" --scope user
+```
+
+`--scope user` makes it available across all your projects; leave it off for the
+current project only. Claude Code reads the operating system's certificate
+store, so once you have installed the certificate (see
+[Trusting the certificate](#trusting-the-certificate)) nothing further is
+needed.
+
+On the server itself you can skip the network entirely and run it over stdio:
+
+```bash
+claude mcp add trmm -- /opt/trmm-mcp/run.sh readonly
+```
+
+Swap `readonly` for `elevate` to get the approval gate, or `command` for
+unattended execution. Keeping two entries (`trmm` and `trmm-command`) makes the
+active capability obvious at a glance.
+
+### Claude Desktop — macOS, Windows, Linux (beta)
+
+Desktop's built-in "custom connector" UI cannot reach this server. Those
+connectors are dialled from Anthropic's own infrastructure, so a private address
+is unroutable from there and a self-signed certificate is rejected.
+`claude_desktop_config.json` is stdio-only as well — it has no `url` field. The
+working route is `mcp-remote`, a small Node bridge that Desktop launches locally
+and which speaks HTTP to this server. Node 18+ is required.
+
+Open the config with **Settings → Developer → Edit Config** (the Claude menu in
+the menu bar or app menu, not the in-window account settings). That button opens
+whichever file the install actually reads, which saves you guessing. The paths,
+if you want them directly:
+
+| OS | Path |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` (not documented by Anthropic; prefer the in-app button) |
+
+**macOS and Linux** — `npx` is invoked directly:
+
+```json
+{
+  "mcpServers": {
+    "tacticalrmm": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote@latest",
+        "https://192.0.2.10:8770/mcp",
+        "--transport", "http-only",
+        "--header", "Authorization:${AUTH_HEADER}"
+      ],
+      "env": {
+        "AUTH_HEADER": "Bearer <TRMM_MCP_AUTH_TOKEN from .env>",
+        "NODE_EXTRA_CA_CERTS": "/Users/you/trmm-mcp-cert.pem"
+      }
+    }
+  }
+}
+```
+
+On Linux the certificate path is typically `/home/you/trmm-mcp-cert.pem`.
+
+**Windows** — the same thing wrapped in `cmd /c`:
+
+```json
+{
+  "mcpServers": {
+    "tacticalrmm": {
+      "command": "cmd",
+      "args": [
+        "/c", "npx", "-y", "mcp-remote@latest",
+        "https://192.0.2.10:8770/mcp",
+        "--transport", "http-only",
+        "--header", "Authorization:${AUTH_HEADER}"
+      ],
+      "env": {
+        "AUTH_HEADER": "Bearer <TRMM_MCP_AUTH_TOKEN from .env>",
+        "NODE_EXTRA_CA_CERTS": "C:\\Users\\YOU\\trmm-mcp-cert.pem"
+      }
+    }
+  }
+}
+```
+
+Three details worth understanding:
+
+- `cmd /c` is a Windows-only workaround. There, `npx` is the batch shim
+  `npx.cmd`, which Node only resolves through `PATHEXT` when spawned with a
+  shell; Electron hosts that spawn without one fail with `spawn npx ENOENT`. No
+  such shim exists on macOS or Linux, so the wrapper is unnecessary there. Some
+  Windows builds do spawn with a shell and work without it — treat `cmd /c` as
+  the safe default rather than a hard requirement.
+- `Authorization:${AUTH_HEADER}` with the value in `env`, and no space after the
+  colon. Claude Desktop on Windows does not escape spaces inside `args`, which
+  splits a literal `Bearer xyz` into stray arguments. mcp-remote expands
+  `${VAR}` itself, so the space stays safely inside the variable. Harmless on
+  every platform, so use it everywhere.
+- `NODE_EXTRA_CA_CERTS` is the same variable name on all three systems. It
+  *appends* to Node's trust store rather than disabling verification, so the
+  certificate still has to match the address you dial. Prefer it over
+  `NODE_TLS_REJECT_UNAUTHORIZED=0`, which switches verification off for
+  everything that process touches. Escape the backslashes on Windows.
+
+Then quit Claude Desktop completely and reopen it. On Windows and macOS, closing
+the window leaves it running — use the tray or menu-bar icon and pick Quit.
+Start a new chat afterwards, since the tool list is fixed when a conversation
+begins.
+
+If Desktop appears to ignore your config on Windows, you are probably on the
+MSIX build from the Store or WinGet, which virtualizes the filesystem. It reads
+`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`, while the "Edit
+Config" button may open the un-virtualized `%APPDATA%` copy. Find the real one:
+
+```powershell
+$p = Get-ChildItem "$env:LOCALAPPDATA\Packages\Claude_*" -Directory | Select-Object -First 1
+"$($p.FullName)\LocalCache\Roaming\Claude\claude_desktop_config.json"
+```
+
+To test the bridge outside Desktop when something misbehaves:
+
+```bash
+npx -p mcp-remote@latest mcp-remote-client https://192.0.2.10:8770/mcp --transport http-only --header "Authorization: Bearer <token>"
+```
+
+Connection failures are logged to `mcp.log`, and each server's stderr to
+`mcp-server-tacticalrmm.log` — under `~/Library/Logs/Claude` on macOS and
+`%APPDATA%\Claude\logs` on Windows (with the same MSIX redirect).
+
+### LM Studio — macOS, Windows, Linux
+
+LM Studio speaks remote HTTP natively, so no bridge is needed. Edit `mcp.json`
+through the app: right sidebar → **Program** → **Install** → **Edit mcp.json**.
+The documented path (`~/.lmstudio/mcp.json`) and the path several versions
+actually use (`~/.cache/lm-studio/mcp.json`) disagree, so the in-app editor is
+the reliable route.
+
+```json
+{
+  "mcpServers": {
+    "tacticalrmm": {
+      "url": "https://192.0.2.10:8770/mcp",
+      "headers": { "Authorization": "Bearer <TRMM_MCP_AUTH_TOKEN from .env>" },
+      "timeout": 60000
+    }
+  }
+}
+```
+
+Two caveats. LM Studio rejects self-signed certificates and offers no setting to
+trust one, so start it with the CA in the environment:
+
+```bash
+NODE_EXTRA_CA_CERTS=~/trmm-mcp-cert.pem "/Applications/LM Studio.app/Contents/MacOS/LM Studio"   # macOS
+NODE_EXTRA_CA_CERTS=~/trmm-mcp-cert.pem lm-studio                                                # Linux
+```
+
+```powershell
+$env:NODE_EXTRA_CA_CERTS="$env:USERPROFILE\trmm-mcp-cert.pem"; & "$env:LOCALAPPDATA\Programs\LM Studio\LM Studio.exe"
+```
+
+And recent versions block private IP addresses for servers added dynamically
+through the API. Declaring the server in `mcp.json`, as above, is the supported
+way around that.
+
+LM Studio prompts before every tool call and shows the arguments, which is a
+useful second pair of eyes — but it is the client asking, and it can be set to
+"always allow". The approval gate on this server is the real boundary.
+
+### Over SSH instead — no open port
+
+Rather than exposing the HTTP listener, a client can run the stdio server across
+SSH. Nothing listens on the network and SSH keys do the authentication. This
+suits Claude Desktop, which has no HTTP transport of its own.
+
+Confirm passwordless SSH from the workstation first.
+
+macOS and Linux:
+
+```bash
+ssh -o BatchMode=yes rmmuser@192.0.2.10 "echo OK"
+ssh-keygen -t ed25519 -C "mcp-client"                      # if it prompted
+ssh-copy-id rmmuser@192.0.2.10
+```
+
+Windows (PowerShell):
+
+```powershell
+ssh -o BatchMode=yes rmmuser@192.0.2.10 "echo OK"
+ssh-keygen -t ed25519 -C "mcp-client"                      # if it prompted
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh rmmuser@192.0.2.10 "cat >> ~/.ssh/authorized_keys"
+```
+
+Then, in `claude_desktop_config.json` — `ssh` on macOS and Linux,
+`C:\\Windows\\System32\\OpenSSH\\ssh.exe` on Windows:
+
+```json
+{
+  "mcpServers": {
+    "tacticalrmm": {
+      "command": "ssh",
+      "args": [
+        "-T",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "rmmuser@192.0.2.10",
+        "/opt/trmm-mcp/run.sh readonly"
+      ]
+    }
+  }
+}
+```
+
+`-T` is required: a pseudo-TTY would corrupt the JSON-RPC stream. `BatchMode`
+makes a missing key fail immediately instead of hanging on a password prompt the
+client cannot answer.
+
+Verified on this server: launching under a minimal environment from a different
+working directory still handshakes cleanly, and `~/.bashrc` has the standard
+non-interactive guard, so nothing pollutes the protocol stream.
+
+### Trusting the certificate
+
+Node-based clients (Claude Desktop via mcp-remote, LM Studio) read
+`NODE_EXTRA_CA_CERTS` and need nothing else. Claude Code and your browser read
+the operating system store, so install the certificate there to use the approval
+page without warnings.
+
+**macOS:**
+
+```bash
+sudo security add-trusted-cert -d -r trustAsRoot -k /Library/Keychains/System.keychain ~/trmm-mcp-cert.pem
+```
+
+**Windows** (elevated prompt):
+
+```cmd
+certutil -addstore -f root "%USERPROFILE%\trmm-mcp-cert.pem"
+```
+
+**Linux** (Debian/Ubuntu — note the `.crt` extension is required):
+
+```bash
+sudo cp ~/trmm-mcp-cert.pem /usr/local/share/ca-certificates/trmm-mcp.crt && sudo update-ca-certificates
+```
+
+**Linux** (RHEL/Fedora):
+
+```bash
+sudo cp ~/trmm-mcp-cert.pem /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust extract
+```
+
+Two browser quirks. Firefox keeps its own certificate store on every platform
+and ignores the system one, so import there separately or set
+`security.enterprise_roots.enabled` in `about:config`. Chrome on Linux also uses
+its own NSS database rather than the system bundle:
+
+```bash
+certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "trmm-mcp" -i ~/trmm-mcp-cert.pem
+```
+
+Alternatively just accept the browser warning once — the approval page still
+protects itself with a password and TOTP.
 
 ## Tools
 
@@ -398,6 +588,57 @@ purpose, not overlooked.
   `TRMM_MCP_BLOCK_PATTERNS` (set empty to disable).
 - Optional agent allowlist: set `TRMM_MCP_AGENT_ALLOWLIST` to a comma-separated
   list of hostnames/agent_ids to hard-scope what can be touched.
+
+## Audit logging
+
+Everything the server is asked to do, everything it does, and everything that
+fails is recorded under `logs/`. Both files rotate at 10 MB × 5 backups and are
+mode 600.
+
+| File | What's in it |
+|---|---|
+| `logs/events.jsonl` | The audit trail: one JSON object per line |
+| `logs/server.log` | Human-readable diagnostics — warnings, errors, tracebacks, and anything uvicorn/httpx/the SDK emit |
+| `command-audit.log` | Mutating TRMM calls only, kept as a short separate record |
+
+Event kinds in `events.jsonl`:
+
+| kind | Meaning |
+|---|---|
+| `startup` | Process start, with mode and transport |
+| `request` | An inbound MCP call, with tool name and full arguments |
+| `response` | Its outcome: ok/error, duration, result payload |
+| `api_call` | Every TRMM API request — method, path, status, bytes, duration, whether the command key was used |
+| `mutation` | A state-changing TRMM call |
+| `elevation_required` / `elevation_granted` | Approval refused or spent |
+| `approval` | Approve/deny/window/revoke decisions |
+| `blocked` | A refusal — read-only guard, destructive pattern, agent allowlist |
+| `error` | An exception, with type, message and traceback |
+
+Reading it:
+
+```bash
+cd /opt/trmm-mcp && ./venv/bin/python logs.py -n 40
+```
+
+`-f` follows live, `-k error` or `-k blocked` filters by kind, `-t run_command`
+by tool, `--full` prints whole records. It's plain JSONL, so `jq` works too:
+
+```bash
+jq -c 'select(.kind=="response" and .ok==false)' /opt/trmm-mcp/logs/events.jsonl
+```
+
+Credentials are redacted on the way to disk — the TRMM API keys and the
+bearer token are replaced with `<redacted:abcd...>` wherever they appear,
+including inside error text. Verified by a test that greps the log for each
+live secret.
+
+Two things to know. Tool results are recorded, and for an RMM that means
+command output can land in the log — that is usually what you want for an audit
+trail, but treat `logs/` as sensitive. Payloads are clipped to
+`TRMM_MCP_LOG_PAYLOAD_CHARS` (default 4000, `-1` for everything, `0` to record
+sizes only). And nothing is ever written to stdout, because under stdio that
+channel carries the protocol.
 
 ## Backups
 
@@ -542,57 +783,6 @@ So: `trmm_get_agent` omits heavy sections unless you name them in `include`
 to useful fields and take `limit`; and every result is capped at
 `TRMM_MCP_MAX_RESPONSE_CHARS` with an explicit truncation notice rather than
 silent cutoff.
-
-## Logging
-
-Everything the server is asked to do, everything it does, and everything that
-fails is recorded under `logs/`. Both files rotate at 10 MB × 5 backups and are
-mode 600.
-
-| File | What's in it |
-|---|---|
-| `logs/events.jsonl` | The audit trail: one JSON object per line |
-| `logs/server.log` | Human-readable diagnostics — warnings, errors, tracebacks, and anything uvicorn/httpx/the SDK emit |
-| `command-audit.log` | Mutating TRMM calls only, kept as a short separate record |
-
-Event kinds in `events.jsonl`:
-
-| kind | Meaning |
-|---|---|
-| `startup` | Process start, with mode and transport |
-| `request` | An inbound MCP call — **tool name and full arguments** |
-| `response` | Its outcome: ok/error, duration, result payload |
-| `api_call` | Every TRMM API request — method, path, status, bytes, duration, whether the command key was used |
-| `mutation` | A state-changing TRMM call |
-| `elevation_required` / `elevation_granted` | Approval refused or spent |
-| `approval` | Approve/deny/window/revoke decisions |
-| `blocked` | A refusal — read-only guard, destructive pattern, agent allowlist |
-| `error` | An exception, with type, message and traceback |
-
-Reading it:
-
-```bash
-cd /opt/trmm-mcp && ./venv/bin/python logs.py -n 40
-```
-
-`-f` follows live, `-k error` or `-k blocked` filters by kind, `-t run_command`
-by tool, `--full` prints whole records. It's plain JSONL, so `jq` works too:
-
-```bash
-jq -c 'select(.kind=="response" and .ok==false)' /opt/trmm-mcp/logs/events.jsonl
-```
-
-**Credentials are redacted** on the way to disk — the TRMM API keys and the
-bearer token are replaced with `<redacted:abcd...>` wherever they appear,
-including inside error text. Verified by a test that greps the log for each
-live secret.
-
-Two things to know. Tool **results are recorded**, and for an RMM that means
-command output can land in the log — that is usually what you want for an audit
-trail, but treat `logs/` as sensitive. Payloads are clipped to
-`TRMM_MCP_LOG_PAYLOAD_CHARS` (default 4000, `-1` for everything, `0` to record
-sizes only). And nothing is ever written to stdout, because under stdio that
-channel carries the protocol.
 
 ## Output shape
 
