@@ -36,6 +36,11 @@ Documentation = "https://github.com/shin2344234/trmm-mcp/blob/master/README.md"
 
 [project.scripts]
 trmm-mcp = "trmm_mcp.server:main"
+# Operator tooling. Without these an installed copy could run the server but
+# had no way to enrol the approval password + TOTP, which elevate mode needs.
+trmm-mcp-setup-auth = "trmm_mcp.cli_setup_auth:main"
+trmm-mcp-approve = "trmm_mcp.cli_approve:main"
+trmm-mcp-logs = "trmm_mcp.cli_logs:main"
 
 [tool.setuptools]
 packages = ["trmm_mcp"]

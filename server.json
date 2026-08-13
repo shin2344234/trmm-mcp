@@ -1,0 +1,52 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.shin2344234/trmm-mcp",
+  "title": "TacticalRMM",
+  "description": "Read your TacticalRMM fleet; run commands only after per-command human approval.",
+  "repository": {
+    "url": "https://github.com/shin2344234/trmm-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "trmm-mcp",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "TRMM_API_URL",
+          "description": "Base URL of your TacticalRMM backend, e.g. https://api.example.com",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "TRMM_READONLY_API_KEY",
+          "description": "TacticalRMM API key bound to a read-only role. Used for all reads.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "TRMM_COMMAND_API_KEY",
+          "description": "TacticalRMM API key permitted to execute. Only needed for elevate or command mode, and only used after an approval is granted.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "TRMM_MCP_MODE",
+          "description": "readonly (default, 20 read tools), elevate (adds 8 execution tools, each requiring out-of-band human approval), or command (execution with no gate).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "default": "readonly"
+        }
+      ]
+    }
+  ]
+}

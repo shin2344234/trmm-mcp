@@ -33,3 +33,4 @@ dist/
 mcp-backup-*.tar.zst
 mcp-backup-*.tar.zst.gpg
 *.sha256
+dist/
