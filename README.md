@@ -8,6 +8,21 @@ desk PC", "show me every failed check this week", and get answers from live
 fleet data. Turn on `elevate` mode and the assistant can also fix things, but
 only after you approve each action yourself.
 
+## Why I built it
+
+I manage machines for a number of clients, and TacticalRMM already collects far
+more about each one than anyone has time to sit and read. I wanted to actually
+use that data: run deeper diagnostics than the dashboard puts in front of you,
+produce per-client reports covering every device, and find the things worth
+fixing before someone rings up to report them.
+
+It does grow billable work, and I think that is fine as long as the work is
+real. A disk throwing early SMART errors, a server quietly filling up, patches
+that stopped applying three months ago and nobody noticed — catching those is
+worth paying for. Billing for busywork is not. The test I hold this to is
+whether every item on a report is something the client can see the sense in
+fixing once it has been explained to them.
+
 ## What you get
 
 **28 tools.** 20 read-only ones covering agents, checks, alerts, services,
