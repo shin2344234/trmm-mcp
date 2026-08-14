@@ -7,7 +7,43 @@ import os
 import re
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+def _resolve_base_dir() -> Path:
+    """Where .env, state/, certs/ and the audit log live.
+
+    Three cases, in order:
+
+    1. TRMM_MCP_BASE_DIR, if set. Read from the real environment rather than
+       .env, since it decides where .env is found in the first place.
+    2. An installed copy (pip/pipx/uvx). The package sits in site-packages,
+       whose parent is not a sane place to write credentials and approval
+       state - and under uvx it is a disposable cache. Use a per-user
+       directory instead.
+    3. A clone or editable install: the repo root, as it always has been.
+    """
+    override = os.environ.get("TRMM_MCP_BASE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    here = Path(__file__).resolve()
+    installed = any(p.name in ("site-packages", "dist-packages") for p in here.parents)
+    if not installed:
+        return here.parent.parent
+
+    if os.name == "nt":
+        root = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
+    else:
+        root = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    base = Path(root).expanduser().resolve() / "trmm-mcp"
+    # Holds API keys, the approval password hash and the TOTP secret.
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        base.chmod(0o700)
+    except OSError:
+        pass
+    return base
+
+
+BASE_DIR = _resolve_base_dir()
 
 READONLY = "readonly"
 ELEVATE = "elevate"

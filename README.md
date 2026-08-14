@@ -735,17 +735,55 @@ convenience.
 
 ## Installing as a package
 
-The server is a proper Python package (`pyproject.toml`), pinned to the SDK 2.0
-API it targets:
+Published on PyPI as [`trmm-mcp`](https://pypi.org/project/trmm-mcp/):
 
 ```bash
-cd /opt/trmm-mcp && ./venv/bin/pip install -e .
+pip install trmm-mcp
 ```
 
-That registers a `trmm-mcp` console entry point equivalent to
-`python -m trmm_mcp.server`. The existing systemd unit and `run.sh` keep working
-either way — installing is only needed if you want the entry point or to build a
-distributable wheel.
+That gives you four console entry points — `trmm-mcp` (the server, equivalent to
+`python -m trmm_mcp.server`), plus `trmm-mcp-setup-auth`, `trmm-mcp-approve` and
+`trmm-mcp-logs`. A client config can then just say `"command": "trmm-mcp"`.
+
+**Which install do you want?**
+
+| | `pip install trmm-mcp` | git clone |
+|---|---|---|
+| read-only mode | yes | yes |
+| elevate / command mode | possible, but see below | recommended |
+| `provision_trmm_accounts.py` | not included | included |
+| systemd unit, `backup-mcp.sh` | not included | included |
+
+The wheel deliberately ships only the `trmm_mcp` package. The provisioning
+script that creates the TRMM roles and API keys, the systemd unit and the backup
+scripts are operational tooling, not library code, so they live in the repo. For
+read-only use none of that matters: pass `TRMM_API_URL` and
+`TRMM_READONLY_API_KEY` in your client's `env` block and you are done.
+
+Elevate mode is the awkward one. It wants a persistent state directory, a TLS
+keypair and enrolled approval credentials, plus something to keep the process
+running — which is what the clone gives you. It will work from a pip install,
+but you are assembling by hand what the repo already has.
+
+### Where it keeps its files
+
+`.env`, `state/`, `certs/`, `logs/` and `command-audit.log` all sit under one
+base directory, resolved in this order:
+
+1. `TRMM_MCP_BASE_DIR`, if set.
+2. An installed copy (pip/pipx/uvx): `$XDG_DATA_HOME/trmm-mcp`, defaulting to
+   `~/.local/share/trmm-mcp` (`%APPDATA%\trmm-mcp` on Windows). Created mode
+   `0700`, because it holds API keys, the approval password hash and the TOTP
+   secret.
+3. A clone or `pip install -e .`: the repo root, as before.
+
+Set `TRMM_MCP_BASE_DIR` explicitly if you want it somewhere else — and do set it
+if you run from `uvx`, whose cache is disposable and would otherwise take your
+approval state with it.
+
+To work on the code in place, `cd /opt/trmm-mcp && ./venv/bin/pip install -e .`
+still behaves exactly as a clone does. The systemd unit and `run.sh` keep
+working either way.
 
 ## Tool annotations
 
@@ -776,12 +814,15 @@ cd /opt/trmm-mcp && ./venv/bin/pip install -r requirements.txt
 
 ## Configuration
 
-All settings are environment variables, read from `.env` in this directory
-(real environment variables take precedence).
+All settings are environment variables, read from `.env` in the base directory
+(real environment variables take precedence). Paths shown as `./x` below are
+relative to that base directory — see
+[Where it keeps its files](#where-it-keeps-its-files).
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `TRMM_API_URL` | — | Backend base URL |
+| `TRMM_MCP_BASE_DIR` | repo root, or `~/.local/share/trmm-mcp` when installed | Where `.env`, `state/`, `certs/` and logs live |
 | `TRMM_MCP_MODE` | `readonly` | `readonly`, `elevate` or `command` |
 | `TRMM_MCP_APPROVAL_PASSWORD_HASH` | unset | PBKDF2 hash; set by `setup_approval_auth.py` |
 | `TRMM_MCP_APPROVAL_TOTP_SECRET` | unset | Base32 TOTP secret; set by the same script |
@@ -857,6 +898,20 @@ cd /opt/trmm-mcp && ./venv/bin/python protocol_test.py readonly
 
 Launches the server as a real MCP client would and asserts no execution tools
 are exposed over the wire.
+
+```bash
+cd /opt/trmm-mcp && ./venv/bin/python config_test.py
+```
+
+Checks where `.env`, `state/`, `certs/` and the audit log get resolved to, for a
+clone, a pip install and an explicit `TRMM_MCP_BASE_DIR` — the case that matters
+being that an installed copy never writes credentials into `site-packages`.
+9 checks, no network or live TRMM needed.
+
+The remaining suites — `render_test.py`, `elevation_test.py`,
+`approval_auth_test.py`, `logging_test.py` — cover the approval-page rendering
+and spoofing defences, the approval lifecycle, the password/TOTP gate and the
+audit log, and likewise run offline.
 
 ## Troubleshooting
 
