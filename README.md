@@ -680,6 +680,26 @@ trail, but treat `logs/` as sensitive. Payloads are clipped to
 sizes only). And nothing is ever written to stdout, because under stdio that
 channel carries the protocol.
 
+### Reading it in the browser
+
+The approval page has a **View activity log** button leading to
+`/approve/history`, behind the same password + 2FA. It reads the same
+`events.jsonl`, so there is one audit trail rather than a second one that can
+disagree with the first.
+
+Filter chips narrow it to approvals, changes actually made, refused commands,
+problems, sign-ins, tool calls or TRMM API traffic; there is a free-text
+search, and the row count goes up to 1000. Only the tail of the log is scanned
+(the last 20,000 lines), so a filter that matches nothing recent cannot turn
+into a full scan of a large file — the page says so when that limit is what
+bounded the results.
+
+Every value shown comes from the model or from a managed machine, so it is
+escaped and passed through the same treatment the approval page gives a
+command: bidi overrides, zero-width and control characters are rendered as
+visible markers like `⟦202E⟧` rather than being obeyed. A logged command cannot
+reorder itself into looking harmless on the page you use to audit it.
+
 ## Backups
 
 Two things need backing up on this box, and **TacticalRMM itself is the

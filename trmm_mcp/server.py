@@ -1158,6 +1158,11 @@ def main() -> None:
         app.router.routes.extend(
             [
                 Route("/approve/", approval_web.index, methods=["GET"]),
+                Route(
+                    "/approve/history",
+                    approval_web.history,
+                    methods=["GET"],
+                ),
                 Route("/approve/login", approval_web.login, methods=["POST"]),
                 Route("/approve/logout", approval_web.logout, methods=["POST"]),
                 Route(

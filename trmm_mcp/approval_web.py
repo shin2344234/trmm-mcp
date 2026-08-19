@@ -115,6 +115,38 @@ input[type=password], input[type=text], input[type=number] {
   border: 1px solid var(--line); background: transparent; color: inherit;
   min-height: 2.6rem; }
 input[type=number] { width: 5.5rem; }
+/* --- activity log --- */
+.nav { display: flex; gap: .45rem; flex-wrap: wrap; align-items: center;
+       margin: .7rem 0 0; }
+.btn { display: inline-block; font-size: .85rem; padding: .45rem .9rem;
+       border: 1px solid var(--line); border-radius: 7px; cursor: pointer;
+       text-decoration: none; color: inherit; min-height: 2.2rem; }
+.btn:hover { background: var(--panel); }
+.btn.on { background: var(--panel); font-weight: 640; border-color: var(--dim); }
+table.log { width: 100%; border-collapse: collapse; font-size: .86rem;
+            margin: .6rem 0 0; }
+table.log th { text-align: left; font-weight: 500; color: var(--dim);
+               font-size: .72rem; text-transform: uppercase;
+               letter-spacing: .06em; padding: .3rem .7rem .3rem 0;
+               border-bottom: 1px solid var(--line); }
+table.log td { padding: .38rem .7rem .38rem 0; vertical-align: top;
+               border-bottom: 1px solid var(--panel); }
+td.t { white-space: nowrap; color: var(--dim); width: 1%;
+       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+       font-size: .79rem; }
+td.k { white-space: nowrap; width: 1%; }
+td.d { word-break: break-word; }
+td.d code { font-size: .82rem; }
+.kind { display: inline-block; font-size: .66rem; font-weight: 700;
+        letter-spacing: .04em; padding: .12rem .4rem; border-radius: 4px;
+        border: 1px solid currentColor; white-space: nowrap; }
+.k-high { color: var(--high); }
+.k-mid { color: var(--mid); }
+.k-low { color: var(--low); }
+.k-dim { color: var(--dim); }
+.ok { color: var(--low); font-weight: 600; }
+.bad { color: var(--high); font-weight: 600; }
+
 @media (max-width: 30rem) {
   .actions button { flex: 1 1 100%; }
   .num { flex-basis: 2rem; }
@@ -372,6 +404,7 @@ async def index(request: Request):
     parts = [
         f"<h1>{headline}</h1>",
         f"<p class='meta'>TacticalRMM · mode: {html.escape(config.MODE)}</p>",
+        "<p class='nav'><a class='btn' href='history'>View activity log</a></p>",
     ]
 
     if not pending:
@@ -467,3 +500,264 @@ async def revoke(request: Request):
         return _login_page()
     elevation.revoke_all()
     return RedirectResponse(url=".", status_code=303)
+
+
+# --- activity log -----------------------------------------------------------
+#
+# The approval page answers "what is being asked of me right now". This answers
+# "what has this server actually been doing" - the question you ask after the
+# fact, when something looks wrong. It reads the same events.jsonl the CLI
+# reads, so there is one audit trail, not two.
+
+# Which event kinds sit behind each filter chip. Empty tuple means "no filter".
+LOG_GROUPS: dict[str, tuple[str, ...]] = {
+    "all": (),
+    "approvals": ("approval", "elevation_required", "elevation_granted"),
+    "executions": ("mutation",),
+    "refused": ("blocked",),
+    "problems": ("error", "startup_warning"),
+    "signins": ("approval_login",),
+    "calls": ("request", "response"),
+    "api": ("api_call",),
+}
+
+LOG_LABELS = {
+    "all": "Everything",
+    "approvals": "Approvals",
+    "executions": "Changes made",
+    "refused": "Refused",
+    "problems": "Problems",
+    "signins": "Sign-ins",
+    "calls": "Tool calls",
+    "api": "TRMM API",
+}
+
+# Colour by how much the reader should care, not by alphabet.
+KIND_CLASS = {
+    "blocked": "k-high", "error": "k-high", "mutation": "k-high",
+    "startup_warning": "k-mid", "elevation_required": "k-mid",
+    "approval": "k-mid",
+    "elevation_granted": "k-low", "approval_login": "k-low",
+}
+
+# How far back to look before filtering. A filter that matches nothing recent
+# should not turn into a full scan of a log that may be hundreds of MB.
+SCAN_LINES = 20000
+
+
+def _tail_lines(path, wanted: int) -> list[str]:
+    """The last `wanted` lines, read backwards so a large log stays cheap."""
+    if not path.exists():
+        return []
+    step = 64 * 1024
+    data = b""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            position = handle.tell()
+            while position > 0 and data.count(b"\n") <= wanted:
+                back = min(step, position)
+                position -= back
+                handle.seek(position)
+                data = handle.read(back) + data
+    except OSError:
+        return []
+    return data.decode("utf-8", "replace").splitlines()[-wanted:]
+
+
+def _load_events(kinds: tuple[str, ...], query: str, limit: int):
+    """Newest `limit` events matching the filters, plus how many lines we read."""
+    lines = _tail_lines(config.LOG_DIR / "events.jsonl", SCAN_LINES)
+    needle = query.lower()
+    found: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if kinds and record.get("kind") not in kinds:
+            continue
+        if needle and needle not in json.dumps(record, default=str).lower():
+            continue
+        found.append(record)
+    return found[-limit:], len(lines)
+
+
+def _mono(text: Any, cap: int = 220) -> str:
+    """Model-supplied text. _visible escapes it AND unmasks bidi/zero-width,
+    so a command cannot reorder itself into looking harmless in this table."""
+    raw = str(text)
+    clipped = raw[:cap] + ("…" if len(raw) > cap else "")
+    return f"<code>{render._visible(clipped)}</code>"
+
+
+def _event_summary(record: dict[str, Any]) -> str:
+    """One event, in the words you would use to describe it out loud."""
+    kind = record.get("kind", "?")
+
+    if kind in ("request", "response"):
+        what = record.get("tool") or record.get("method") or ""
+        text = f"<b>{render._visible(str(what))}</b>"
+        if kind == "request" and record.get("arguments"):
+            text += " " + _mono(json.dumps(record["arguments"], default=str))
+        if kind == "response":
+            ok = record.get("ok")
+            text += (f" <span class='{'ok' if ok else 'bad'}'>"
+                     f"{'ok' if ok else 'failed'}</span>")
+            if record.get("duration_ms") is not None:
+                text += f" <span class='meta'>{record['duration_ms']} ms</span>"
+        return text
+
+    if kind == "api_call":
+        status = record.get("status")
+        good = isinstance(status, int) and status < 400
+        return (
+            f"{html.escape(str(record.get('method', '')))} "
+            f"{_mono(record.get('path', ''), 140)} "
+            f"<span class='{'ok' if good else 'bad'}'>{html.escape(str(status))}</span> "
+            f"<span class='meta'>{record.get('duration_ms')} ms · "
+            f"{record.get('bytes', 0)} B</span>"
+            + (" <span class='k-high'>elevated</span>" if record.get("elevated") else "")
+        )
+
+    if kind == "error":
+        return (
+            f"<b>{render._visible(str(record.get('tool') or record.get('method') or ''))}</b> "
+            f"<span class='bad'>{html.escape(str(record.get('error_type', '')))}</span> "
+            + _mono(record.get("error", ""))
+        )
+
+    if kind == "blocked":
+        return (
+            f"<span class='bad'>{html.escape(str(record.get('reason', 'refused')))}</span> "
+            + _mono(record.get("command") or record.get("path") or "")
+        )
+
+    if kind in ("elevation_required", "elevation_granted"):
+        return _mono(record.get("summary", ""), 260)
+
+    if kind == "approval":
+        decision = str(record.get("decision", ""))
+        css = "ok" if decision in ("approved", "consumed") else "bad"
+        return (f"<span class='{css}'>{html.escape(decision)}</span> "
+                + _mono(record.get("detail", ""), 260))
+
+    if kind == "mutation":
+        return (
+            f"{html.escape(str(record.get('method', '')))} "
+            f"{_mono(record.get('path', ''), 140)} "
+            f"&rarr; {html.escape(str(record.get('outcome', '')))}"
+        )
+
+    if kind == "approval_login":
+        ok = record.get("ok")
+        return (f"<span class='{'ok' if ok else 'bad'}'>"
+                f"{'signed in' if ok else 'rejected'}</span> "
+                f"<span class='meta'>from "
+                f"{html.escape(str(record.get('client', 'unknown')))}</span>")
+
+    if kind in ("startup", "startup_warning"):
+        return _mono(record.get("detail") or record.get("message")
+                     or json.dumps({k: v for k, v in record.items()
+                                    if k not in ("ts", "kind", "epoch", "pid")},
+                                   default=str), 260)
+
+    rest = {k: v for k, v in record.items()
+            if k not in ("ts", "kind", "epoch", "pid", "mode")}
+    return _mono(json.dumps(rest, default=str), 260)
+
+
+def _event_row(record: dict[str, Any], today: str) -> str:
+    kind = record.get("kind", "?")
+    stamp = str(record.get("ts", ""))
+    date, _, clock = stamp.partition("T")
+    when = clock or stamp
+    if date and date != today:
+        when = f"{date[5:]} {clock}"
+    return (
+        "<tr>"
+        f"<td class='t'>{html.escape(when)}</td>"
+        f"<td class='k'><span class='kind {KIND_CLASS.get(kind, 'k-dim')}'>"
+        f"{html.escape(kind)}</span></td>"
+        f"<td class='d'>{_event_summary(record)}</td>"
+        "</tr>"
+    )
+
+
+async def history(request: Request):
+    if not _authed(request):
+        return _login_page()
+
+    params = request.query_params
+    group = params.get("show", "all")
+    if group not in LOG_GROUPS:
+        group = "all"
+    query = (params.get("q") or "").strip()
+    try:
+        limit = max(10, min(1000, int(params.get("n", "100"))))
+    except (TypeError, ValueError):
+        limit = 100
+
+    events, scanned = _load_events(LOG_GROUPS[group], query, limit)
+    events.reverse()
+    today = time.strftime("%Y-%m-%d")
+
+    chips = "".join(
+        f"<a class='btn{' on' if key == group else ''}' "
+        f"href='history?show={key}&n={limit}"
+        + (f"&q={html.escape(query, quote=True)}" if query else "")
+        + f"'>{html.escape(LOG_LABELS[key])}</a>"
+        for key in LOG_GROUPS
+    )
+
+    parts = [
+        "<h1>Activity</h1>",
+        "<p class='meta'>What this server has actually done. Same record the "
+        "<code>trmm-mcp-logs</code> command reads.</p>",
+        f"<p class='nav'><a class='btn' href='.'>&larr; Back to approvals</a>"
+        f"<a class='btn' href='history?show={group}&n={limit}"
+        + (f"&q={html.escape(query, quote=True)}" if query else "")
+        + "'>Refresh</a></p>",
+        f"<h2>Filter</h2><p class='nav'>{chips}</p>",
+        "<form method='get' action='history' class='nav'>"
+        f"<input type='hidden' name='show' value='{html.escape(group, quote=True)}'>"
+        f"<input type='hidden' name='n' value='{limit}'>"
+        f"<input type='text' name='q' placeholder='search text' "
+        f"value='{html.escape(query, quote=True)}'>"
+        "<button>Search</button></form>",
+    ]
+
+    if not events:
+        where = config.LOG_DIR / "events.jsonl"
+        parts.append(
+            "<p class='empty'>Nothing matches"
+            + (" that search." if query or group != "all" else
+               f" yet — no events recorded in {html.escape(str(where))}.")
+            + "</p>"
+        )
+    else:
+        rows = "".join(_event_row(record, today) for record in events)
+        parts.append(
+            "<table class='log'><thead><tr><th>Time</th><th>Kind</th>"
+            f"<th>What happened</th></tr></thead><tbody>{rows}</tbody></table>"
+        )
+        note = f"Showing the {len(events)} most recent"
+        if scanned >= SCAN_LINES:
+            note += (f", found within the last {scanned:,} log lines — older "
+                     "entries are not searched here")
+        parts.append(f"<p class='meta'>{note}.</p>")
+
+        wider = [n for n in (100, 250, 500, 1000) if n > limit]
+        if wider:
+            more = "".join(
+                f"<a class='btn' href='history?show={group}&n={n}"
+                + (f"&q={html.escape(query, quote=True)}" if query else "")
+                + f"'>Show {n}</a>"
+                for n in wider
+            )
+            parts.append(f"<p class='nav'>{more}</p>")
+
+    return _page("TRMM MCP activity", "".join(parts))
