@@ -99,7 +99,7 @@ copy requirements.txt
 copy trmm-mcp.service
 copy run.sh
 copy README.md
-copy TRMM-API.md
+copy docs
 copy command-audit.log
 for f in "${SRC}"/*.py; do [ -e "$f" ] && cp -a "$f" "${stage}/" || true; done
 
