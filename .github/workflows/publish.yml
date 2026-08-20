@@ -42,17 +42,41 @@ jobs:
           fi
 
       - name: Test
-        # Only the suites that need neither a live TacticalRMM nor a running
-        # server. TRMM_MCP_BASE_DIR points somewhere empty so no .env is read.
+        # Only suites that are genuinely self-contained: no network, no live
+        # TacticalRMM, no running server, and no child process that would load
+        # its own .env. protocol_test is deliberately excluded - it launches
+        # run.sh as a subprocess and calls real tools, so it needs a live TRMM.
         env:
           TRMM_API_URL: https://example.invalid
           TRMM_READONLY_API_KEY: dummy
         run: |
           export TRMM_MCP_BASE_DIR="$(mktemp -d)"
-          for suite in render_test config_test protocol_test; do
+          for suite in render_test config_test; do
             echo "--- $suite"
             python "$suite.py"
           done
+
+      - name: Package imports and entry points resolve
+        env:
+          TRMM_API_URL: https://example.invalid
+          TRMM_READONLY_API_KEY: dummy
+        run: |
+          export TRMM_MCP_BASE_DIR="$(mktemp -d)"
+          pip install .
+          python - <<'PY'
+          import importlib.metadata as md
+          import trmm_mcp
+          print("version:", trmm_mcp.__version__)
+          scripts = md.entry_points(group="console_scripts")
+          mine = {e.name: e for e in scripts if e.module.startswith("trmm_mcp")}
+          expected = {"trmm-mcp", "trmm-mcp-setup-auth",
+                      "trmm-mcp-approve", "trmm-mcp-logs"}
+          missing = expected - set(mine)
+          assert not missing, f"entry points missing: {missing}"
+          for name, entry in sorted(mine.items()):
+              entry.load()
+              print("  ok:", name)
+          PY
 
   publish:
     needs: test
