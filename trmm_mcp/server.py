@@ -1163,6 +1163,11 @@ def main() -> None:
                     approval_web.history,
                     methods=["GET"],
                 ),
+                Route(
+                    "/approve/commands",
+                    approval_web.commands,
+                    methods=["GET"],
+                ),
                 Route("/approve/login", approval_web.login, methods=["POST"]),
                 Route("/approve/logout", approval_web.logout, methods=["POST"]),
                 Route(

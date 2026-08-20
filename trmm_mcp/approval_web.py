@@ -147,6 +147,25 @@ td.d code { font-size: .82rem; }
 .ok { color: var(--low); font-weight: 600; }
 .bad { color: var(--high); font-weight: 600; }
 
+/* --- commands run --- */
+.cmd { border: 1px solid var(--line); border-radius: 10px; margin: 1rem 0;
+       overflow: hidden; border-left-width: 5px; }
+.cmd-top { padding: .85rem 1rem .7rem; }
+.cmd.st-ran { border-left-color: var(--low); }
+.cmd.st-failed, .cmd.st-blocked { border-left-color: var(--high); }
+.cmd.st-refused { border-left-color: var(--mid); }
+.cmd.st-unknown { border-left-color: var(--dim); border-left-style: dashed; }
+.st { display: inline-block; font-size: .66rem; font-weight: 700;
+      letter-spacing: .08em; padding: .2rem .5rem; border-radius: 4px;
+      border: 1.5px solid currentColor; margin-bottom: .5rem; }
+.st.st-ran { color: var(--low); }
+.st.st-failed, .st.st-blocked { color: var(--high); }
+.st.st-refused { color: var(--mid); }
+.st.st-unknown { color: var(--dim); border-style: dashed; }
+.cmd-facts { padding: 0 1rem; }
+.cmd .evidence { margin: .9rem 1rem; }
+.cmd .hint { padding: 0 1rem .8rem; margin: 0; }
+
 @media (max-width: 30rem) {
   .actions button { flex: 1 1 100%; }
   .num { flex-basis: 2rem; }
@@ -404,7 +423,9 @@ async def index(request: Request):
     parts = [
         f"<h1>{headline}</h1>",
         f"<p class='meta'>TacticalRMM · mode: {html.escape(config.MODE)}</p>",
-        "<p class='nav'><a class='btn' href='history'>View activity log</a></p>",
+        "<p class='nav'>"
+        "<a class='btn' href='commands'>Review commands run</a>"
+        "<a class='btn' href='history'>View activity log</a></p>",
     ]
 
     if not pending:
@@ -718,6 +739,7 @@ async def history(request: Request):
         "<p class='meta'>What this server has actually done. Same record the "
         "<code>trmm-mcp-logs</code> command reads.</p>",
         f"<p class='nav'><a class='btn' href='.'>&larr; Back to approvals</a>"
+        f"<a class='btn' href='commands'>Commands run</a>"
         f"<a class='btn' href='history?show={group}&n={limit}"
         + (f"&q={html.escape(query, quote=True)}" if query else "")
         + "'>Refresh</a></p>",
@@ -761,3 +783,306 @@ async def history(request: Request):
             parts.append(f"<p class='nav'>{more}</p>")
 
     return _page("TRMM MCP activity", "".join(parts))
+
+
+# --- commands run -----------------------------------------------------------
+#
+# The activity log is everything; this is the question people actually ask -
+# "what has been run on my machines, and what came back". One card per
+# execution attempt, correlated request-to-response, with the verbatim command
+# and its output. Attempts that were refused are shown too: knowing what was
+# asked for and denied is as much of the record as what ran.
+
+EXEC_TOOLS = (
+    "trmm_run_command", "trmm_run_script", "trmm_run_task", "trmm_run_checks",
+    "trmm_reboot_agent", "trmm_service_action", "trmm_kill_process",
+    "trmm_wake_on_lan",
+)
+
+# Kept in step with _SHELL_NAMES in server.py. Duplicated rather than imported
+# because server.py imports this module.
+SHELL_NAMES = {
+    "cmd": "Command Prompt", "powershell": "PowerShell", "shell": "shell",
+    "python": "Python", "nushell": "Nushell", "deno": "Deno",
+}
+
+STATUS_LABEL = {
+    "ran": ("RAN", "st-ran"),
+    "failed": ("FAILED", "st-failed"),
+    "refused": ("NEEDED APPROVAL — DID NOT RUN", "st-refused"),
+    "blocked": ("BLOCKED BY A GUARD", "st-blocked"),
+    "unknown": ("NO RESULT RECORDED", "st-unknown"),
+}
+
+COMMAND_FILTERS = {
+    "all": "Everything",
+    "ran": "Actually ran",
+    "failed": "Failed",
+    "refused": "Refused",
+    "blocked": "Blocked",
+}
+
+
+def _args_of(record: dict[str, Any]) -> dict[str, Any]:
+    """Arguments are logged as a JSON string; older records may be a dict."""
+    raw = record.get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _describe(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Say what was asked for, in the same words the approval page uses."""
+    target = str(args.get("agent") or args.get("agent_id") or "unknown machine")
+
+    if tool == "trmm_run_command":
+        shell = str(args.get("shell", "cmd"))
+        return {
+            "action": f"Run a {SHELL_NAMES.get(shell, shell)} command",
+            "target": target,
+            "code": str(args.get("command", "")),
+            "facts": [
+                ["Shell", SHELL_NAMES.get(shell, shell)],
+                ["Runs as", "the logged-in user" if args.get("run_as_user")
+                            else "SYSTEM (full privileges)"],
+                ["Timeout", f"{args.get('timeout', '?')} seconds"],
+            ],
+        }
+    if tool == "trmm_run_script":
+        facts = [["Script", str(args.get("script_id", "?"))]]
+        if args.get("args"):
+            facts.append(["Arguments", json.dumps(args["args"], default=str)])
+        if args.get("timeout"):
+            facts.append(["Timeout", f"{args['timeout']} seconds"])
+        return {"action": "Run a saved script", "target": target, "facts": facts}
+    if tool == "trmm_reboot_agent":
+        return {"action": "Reboot the machine immediately", "target": target,
+                "facts": [["Effect", "Restarts now, without warning the user"]]}
+    if tool == "trmm_service_action":
+        action = str(args.get("action", "change"))
+        return {"action": f"{action.capitalize()} a Windows service",
+                "target": target,
+                "facts": [["Service", str(args.get("service_name", "?"))]]}
+    if tool == "trmm_kill_process":
+        return {"action": "Force-kill a running process", "target": target,
+                "facts": [["Process ID", str(args.get("pid", "?"))]]}
+    if tool == "trmm_wake_on_lan":
+        return {"action": "Send a wake-on-LAN packet", "target": target, "facts": []}
+    if tool == "trmm_run_checks":
+        return {"action": "Run all checks now", "target": target, "facts": []}
+    if tool == "trmm_run_task":
+        return {"action": "Run an automated task", "target": target,
+                "facts": [["Task", str(args.get("task_id", "?"))]]}
+    return {"action": tool, "target": target,
+            "facts": [[k, json.dumps(v, default=str)[:120]]
+                      for k, v in args.items()]}
+
+
+def _outcome(response: dict[str, Any] | None) -> tuple[str, str, str]:
+    """(status, output, error) - what happened, and what came back."""
+    if response is None:
+        return "unknown", "", ""
+    result = response.get("result")
+    text = result if isinstance(result, str) else json.dumps(result, default=str)
+
+    if response.get("ok"):
+        # A successful run returns a JSON document; the interesting bit is
+        # whatever the machine printed.
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            return "ran", str(text or ""), ""
+        if isinstance(parsed, dict):
+            for key in ("output", "result", "detail", "status"):
+                if key in parsed:
+                    return "ran", str(parsed[key]), ""
+            return "ran", json.dumps(parsed, indent=2, default=str), ""
+        return "ran", str(parsed), ""
+
+    lowered = (text or "").lower()
+    if "approval required" in lowered:
+        return "refused", "", str(text or "")
+    if "blocked" in lowered or "refuses" in lowered or "not permitted" in lowered:
+        return "blocked", "", str(text or "")
+    return "failed", "", str(text or "")
+
+
+def _pair_commands(limit: int, status: str, query: str):
+    """Walk the log once, matching each execution response to its request."""
+    lines = _tail_lines(config.LOG_DIR / "events.jsonl", SCAN_LINES)
+    open_requests: dict[tuple[Any, Any], dict[str, Any]] = {}
+    found: list[dict[str, Any]] = []
+    needle = query.lower()
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        tool = record.get("tool")
+        if tool not in EXEC_TOOLS:
+            continue
+        # request_id restarts from 1 each session, so it is only unique per pid.
+        key = (record.get("pid"), record.get("request_id"))
+        if record.get("kind") == "request":
+            open_requests[key] = record
+        elif record.get("kind") == "response":
+            request = open_requests.pop(key, None)
+            if request is None:
+                continue
+            found.append(_entry(request, record))
+
+    for request in open_requests.values():  # asked, never answered
+        found.append(_entry(request, None))
+
+    found.sort(key=lambda entry: entry["epoch"])
+
+    if status != "all":
+        found = [e for e in found if e["status"] == status]
+    if needle:
+        found = [
+            e for e in found
+            if needle in e["code"].lower()
+            or needle in e["target"].lower()
+            or needle in e["action"].lower()
+            or needle in e["output"].lower()
+        ]
+    return found[-limit:], len(lines)
+
+
+def _entry(request: dict[str, Any], response: dict[str, Any] | None):
+    tool = str(request.get("tool", ""))
+    args = _args_of(request)
+    described = _describe(tool, args)
+    status, output, error = _outcome(response)
+    return {
+        "tool": tool,
+        "ts": str(request.get("ts", "")),
+        "epoch": float(request.get("epoch") or 0),
+        "action": str(described["action"]),
+        "target": str(described["target"]),
+        "code": str(described.get("code") or ""),
+        "facts": described.get("facts") or [],
+        "status": status,
+        "output": output or "",
+        "error": error or "",
+        "duration_ms": (response or {}).get("duration_ms"),
+    }
+
+
+def _command_card(entry: dict[str, Any]) -> str:
+    label, css = STATUS_LABEL.get(entry["status"], STATUS_LABEL["unknown"])
+    date, _, clock = entry["ts"].partition("T")
+
+    head = [
+        f"<div class='cmd {css}'><div class='cmd-top'>",
+        f"<span class='st {css}'>{html.escape(label)}</span>",
+        f"<p class='title'>{html.escape(entry['action'])}</p>",
+        f"<p class='target'>on <b>{render._visible(entry['target'])}</b></p>",
+    ]
+    meta = f"{date} at {clock}" if date else entry["ts"]
+    if entry["duration_ms"] is not None:
+        meta += f" \u00b7 took {entry['duration_ms']} ms"
+    head.append(f"<p class='when'>{html.escape(meta)}</p></div>")
+
+    body = []
+    if entry["code"]:
+        body.append(render.code_block(entry["code"], "Command"))
+    if entry["facts"]:
+        body.append("<div class='cmd-facts'>"
+                    + render.facts_table(entry["facts"]) + "</div>")
+    if entry["output"].strip():
+        shown = entry["output"]
+        clipped = len(shown) > 4000
+        if clipped:
+            shown = shown[:4000]
+        body.append(render.code_block(shown.rstrip(), "What the machine returned"))
+        if clipped:
+            body.append("<p class='hint'>Output truncated for display.</p>")
+    elif entry["status"] == "ran":
+        body.append("<p class='hint'>Ran successfully and returned no output.</p>")
+    if entry["error"]:
+        first = entry["error"].strip().splitlines()[0][:200]
+        body.append(f"<p class='hint'>{render._visible(first)}</p>")
+
+    return "".join(head) + "".join(body) + "</div>"
+
+
+async def commands(request: Request):
+    if not _authed(request):
+        return _login_page()
+
+    params = request.query_params
+    status = params.get("show", "all")
+    if status not in COMMAND_FILTERS:
+        status = "all"
+    query = (params.get("q") or "").strip()
+    try:
+        limit = max(5, min(500, int(params.get("n", "25"))))
+    except (TypeError, ValueError):
+        limit = 25
+
+    entries, scanned = _pair_commands(limit, status, query)
+    entries.reverse()
+
+    def link(key: str, count: int) -> str:
+        tail = f"&q={html.escape(query, quote=True)}" if query else ""
+        return f"commands?show={key}&n={count}{tail}"
+
+    chips = "".join(
+        f"<a class='btn{' on' if key == status else ''}' href='{link(key, limit)}'>"
+        f"{html.escape(name)}</a>"
+        for key, name in COMMAND_FILTERS.items()
+    )
+
+    parts = [
+        "<h1>Commands run</h1>",
+        "<p class='meta'>Every execution this server was asked to perform, what "
+        "was asked for verbatim, and what came back. Refused attempts are kept "
+        "too.</p>",
+        f"<p class='nav'><a class='btn' href='.'>&larr; Back to approvals</a>"
+        f"<a class='btn' href='history'>Full activity log</a>"
+        f"<a class='btn' href='{link(status, limit)}'>Refresh</a></p>",
+        f"<h2>Filter</h2><p class='nav'>{chips}</p>",
+        "<form method='get' action='commands' class='nav'>"
+        f"<input type='hidden' name='show' value='{html.escape(status, quote=True)}'>"
+        f"<input type='hidden' name='n' value='{limit}'>"
+        "<input type='text' name='q' placeholder='search command, machine or output' "
+        f"value='{html.escape(query, quote=True)}'>"
+        "<button>Search</button></form>",
+    ]
+
+    if not entries:
+        parts.append(
+            "<p class='empty'>"
+            + ("Nothing matches that search." if query or status != "all"
+               else "No commands have been run through this server yet.")
+            + "</p>"
+        )
+    else:
+        parts.extend(_command_card(entry) for entry in entries)
+        note = f"Showing the {len(entries)} most recent"
+        if scanned >= SCAN_LINES:
+            note += (f", found within the last {scanned:,} log lines — older "
+                     "runs are not searched here")
+        parts.append(f"<p class='meta'>{note}.</p>")
+
+        wider = [n for n in (25, 50, 100, 250, 500) if n > limit]
+        if wider:
+            parts.append(
+                "<p class='nav'>"
+                + "".join(f"<a class='btn' href='{link(status, n)}'>Show {n}</a>"
+                          for n in wider)
+                + "</p>"
+            )
+
+    return _page("TRMM MCP commands", "".join(parts))

@@ -700,6 +700,32 @@ command: bidi overrides, zero-width and control characters are rendered as
 visible markers like `⟦202E⟧` rather than being obeyed. A logged command cannot
 reorder itself into looking harmless on the page you use to audit it.
 
+### Reviewing what was run
+
+`/approve/commands` — linked from the approval page as **Review commands run** —
+answers the question people actually ask: what has been run on my machines, and
+what came back. One card per execution, correlated request-to-response, showing
+the verbatim command in a numbered block and the machine's output beneath it.
+
+Each card is labelled with what actually happened, which is not the same as what
+was asked for:
+
+| Label | Meaning |
+|---|---|
+| `RAN` | Executed, output shown |
+| `FAILED` | Executed and errored |
+| `NEEDED APPROVAL — DID NOT RUN` | The gate refused it |
+| `BLOCKED BY A GUARD` | Refused by the destructive-pattern guard |
+| `NO RESULT RECORDED` | Asked for, no response logged (e.g. a crash) |
+
+Refused attempts are deliberately kept. What was asked for and denied is as much
+of the audit record as what ran.
+
+Filter by outcome, or search across the command text, the machine name and the
+output. Pairing is keyed on process id *and* request id, because request ids
+restart at 1 with every session — matching on the id alone would attribute one
+session's output to another session's command.
+
 ## Backups
 
 Two things need backing up on this box, and **TacticalRMM itself is the
