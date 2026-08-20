@@ -166,6 +166,29 @@ td.d code { font-size: .82rem; }
 .cmd .evidence { margin: .9rem 1rem; }
 .cmd .hint { padding: 0 1rem .8rem; margin: 0; }
 
+/* --- expandable log rows --- */
+.loghead, .logrow > summary { display: grid; gap: .7rem; align-items: baseline;
+  grid-template-columns: 5.2rem 8.6rem 1fr; padding: .38rem .5rem; }
+.loghead { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--dim); border-bottom: 1px solid var(--line); margin-top: .6rem; }
+.logrow { border-bottom: 1px solid var(--panel); font-size: .86rem; }
+.logrow > summary { cursor: pointer; list-style: none; }
+.logrow > summary::-webkit-details-marker { display: none; }
+.logrow > summary:hover { background: var(--panel); }
+.logrow[open] > summary { background: var(--panel); font-weight: 560; }
+.logrow > summary .t { color: var(--dim); white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .79rem; }
+.logrow > summary .d { word-break: break-word; }
+.logdetail { padding: .5rem .5rem 1rem; border-left: 3px solid var(--line);
+  margin: 0 0 .6rem .3rem; }
+.logdetail .evidence { margin: .7rem 0; }
+.logdetail table.facts { margin: .3rem 0 .7rem; }
+.detail-head { font-size: 1.02rem; font-weight: 600; margin: .2rem 0 .5rem; }
+@media (max-width: 34rem) {
+  .loghead { display: none; }
+  .logrow > summary { grid-template-columns: 1fr; gap: .15rem; }
+}
+
 @media (max-width: 30rem) {
   .actions button { flex: 1 1 100%; }
   .num { flex-basis: 2rem; }
@@ -243,7 +266,10 @@ def _request_card(record: dict[str, Any]) -> str:
     facts = list(display.get("facts") or [])
     if not display:
         facts = [[k, json.dumps(v, default=str)] for k, v in sorted(params.items())]
-    blocks.append(render.facts_table(facts))
+    # Values here can carry a service name, a script argument or - in the
+    # no-display fallback - the raw parameters, all of which came from the
+    # model. _fact_rows unmasks bidi and zero-width; facts_table only escapes.
+    blocks.append(_fact_rows(facts))
 
     expires = float(record.get("expires", 0))
     blocks.append(
@@ -587,10 +613,18 @@ def _tail_lines(path, wanted: int) -> list[str]:
 
 
 def _load_events(kinds: tuple[str, ...], query: str, limit: int):
-    """Newest `limit` events matching the filters, plus how many lines we read."""
+    """Newest `limit` matching events, how many lines we read, and an index.
+
+    The index pairs each request with its response so that opening a row can
+    show the command *and* what came back. It is built from every scanned line,
+    not just the filtered ones - otherwise filtering to "approvals" would hide
+    the response that explains what the approval led to.
+    """
     lines = _tail_lines(config.LOG_DIR / "events.jsonl", SCAN_LINES)
     needle = query.lower()
     found: list[dict[str, Any]] = []
+    index: dict[tuple[Any, Any], dict[str, Any]] = {}
+
     for line in lines:
         line = line.strip()
         if not line:
@@ -599,12 +633,33 @@ def _load_events(kinds: tuple[str, ...], query: str, limit: int):
             record = json.loads(line)
         except ValueError:
             continue
-        if kinds and record.get("kind") not in kinds:
+
+        kind = record.get("kind")
+        if kind in ("request", "response"):
+            # request_id restarts at 1 each session, so it is unique per pid.
+            slot = index.setdefault((record.get("pid"), record.get("request_id")), {})
+            slot[kind] = record
+
+        if kinds and kind not in kinds:
             continue
         if needle and needle not in json.dumps(record, default=str).lower():
             continue
         found.append(record)
-    return found[-limit:], len(lines)
+    return found[-limit:], len(lines), index
+
+
+def _fact_rows(facts: Any) -> str:
+    """render.facts_table escapes but leaves bidi alone, which is right for the
+    server-written facts it was built for. These values come out of the log, so
+    they get the full visible-character treatment instead."""
+    rows = []
+    for entry in facts or []:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            continue
+        label, value = entry
+        rows.append(f"<tr><th>{html.escape(str(label))}</th>"
+                    f"<td>{render._visible(str(value))}</td></tr>")
+    return f'<table class="facts">{"".join(rows)}</table>' if rows else ""
 
 
 def _mono(text: Any, cap: int = 220) -> str:
@@ -691,20 +746,74 @@ def _event_summary(record: dict[str, Any]) -> str:
     return _mono(json.dumps(rest, default=str), 260)
 
 
-def _event_row(record: dict[str, Any], today: str) -> str:
+def _event_detail(record: dict[str, Any], partner: dict[str, Any] | None) -> str:
+    """The long form of one event, shown when a row is opened."""
+    kind = record.get("kind", "?")
+    tool = record.get("tool")
+    request = record if kind == "request" else partner
+    response = record if kind == "response" else partner
+
+    blocks: list[str] = []
+
+    # An execution is worth reconstructing properly: what was asked for, and
+    # what the machine said back. That is the whole question being asked here.
+    if tool in EXEC_TOOLS and isinstance(request, dict):
+        described = _describe(str(tool), _args_of(request))
+        blocks.append(
+            f"<p class='detail-head'>{html.escape(str(described['action']))} on "
+            f"<b>{render._visible(str(described['target']))}</b></p>"
+        )
+        if described.get("code"):
+            blocks.append(render.code_block(str(described["code"]), "Command"))
+        if described.get("facts"):
+            blocks.append(_fact_rows(described["facts"]))
+
+        status, output, error = _outcome(response if isinstance(response, dict) else None)
+        label, css = STATUS_LABEL.get(status, STATUS_LABEL["unknown"])
+        blocks.append(f"<p><span class='st {css}'>{html.escape(label)}</span></p>")
+        if output.strip():
+            blocks.append(render.code_block(output.rstrip()[:4000],
+                                            "What the machine returned"))
+        elif status == "ran":
+            blocks.append("<p class='hint'>Ran and returned no output.</p>")
+        if error.strip():
+            blocks.append(render.code_block(error.rstrip()[:2000], "What came back"))
+    else:
+        skip = ("kind", "epoch")
+        blocks.append(_fact_rows(
+            [[key, value if isinstance(value, str)
+                    else json.dumps(value, default=str)]
+             for key, value in record.items() if key not in skip]
+        ))
+
+    raw = json.dumps(record, indent=2, default=str, ensure_ascii=False)
+    blocks.append(render.code_block(raw[:6000], "Raw log record"))
+    return "".join(blocks)
+
+
+def _event_entry(record: dict[str, Any], today: str,
+                 index: dict[tuple[Any, Any], dict[str, Any]]) -> str:
     kind = record.get("kind", "?")
     stamp = str(record.get("ts", ""))
     date, _, clock = stamp.partition("T")
     when = clock or stamp
     if date and date != today:
         when = f"{date[5:]} {clock}"
+
+    partner = None
+    if kind in ("request", "response"):
+        pair = index.get((record.get("pid"), record.get("request_id"))) or {}
+        partner = pair.get("response" if kind == "request" else "request")
+
     return (
-        "<tr>"
-        f"<td class='t'>{html.escape(when)}</td>"
-        f"<td class='k'><span class='kind {KIND_CLASS.get(kind, 'k-dim')}'>"
-        f"{html.escape(kind)}</span></td>"
-        f"<td class='d'>{_event_summary(record)}</td>"
-        "</tr>"
+        "<details class='logrow'><summary>"
+        f"<span class='t'>{html.escape(when)}</span>"
+        f"<span class='k'><span class='kind {KIND_CLASS.get(kind, 'k-dim')}'>"
+        f"{html.escape(kind)}</span></span>"
+        f"<span class='d'>{_event_summary(record)}</span>"
+        "</summary>"
+        f"<div class='logdetail'>{_event_detail(record, partner)}</div>"
+        "</details>"
     )
 
 
@@ -722,7 +831,7 @@ async def history(request: Request):
     except (TypeError, ValueError):
         limit = 100
 
-    events, scanned = _load_events(LOG_GROUPS[group], query, limit)
+    events, scanned, index = _load_events(LOG_GROUPS[group], query, limit)
     events.reverse()
     today = time.strftime("%Y-%m-%d")
 
@@ -761,11 +870,11 @@ async def history(request: Request):
             + "</p>"
         )
     else:
-        rows = "".join(_event_row(record, today) for record in events)
         parts.append(
-            "<table class='log'><thead><tr><th>Time</th><th>Kind</th>"
-            f"<th>What happened</th></tr></thead><tbody>{rows}</tbody></table>"
+            "<div class='loghead'><span>Time</span><span>Kind</span>"
+            "<span>What happened \u2014 click any row to open it</span></div>"
         )
+        parts.extend(_event_entry(record, today, index) for record in events)
         note = f"Showing the {len(events)} most recent"
         if scanned >= SCAN_LINES:
             note += (f", found within the last {scanned:,} log lines — older "
@@ -999,7 +1108,7 @@ def _command_card(entry: dict[str, Any]) -> str:
         body.append(render.code_block(entry["code"], "Command"))
     if entry["facts"]:
         body.append("<div class='cmd-facts'>"
-                    + render.facts_table(entry["facts"]) + "</div>")
+                    + _fact_rows(entry["facts"]) + "</div>")
     if entry["output"].strip():
         shown = entry["output"]
         clipped = len(shown) > 4000

@@ -103,6 +103,64 @@ def main():
             ok, out = False, repr(exc)
         check(f"survives ?{query[:28]}", ok, "" if ok else str(out)[:160])
 
+    # --- rows open to show the detail ---------------------------------------
+    body = asyncio.run(render("show=calls&n=20", session))
+    check("rows are expandable, with no JavaScript involved",
+          "<details class='logrow'>" in body and "<summary>" in body)
+    check("every row carries a detail pane",
+          body.count("<details class='logrow'>") == body.count("class='logdetail'"),
+          f"{body.count(chr(60) + chr(100) + 'etails')} rows")
+    check("the detail includes the raw record", "Raw log record" in body)
+
+    # A request and its response are two halves of one thing: opening the
+    # request should show what came back, not just what was asked.
+    import json as _json, shutil as _shutil, tempfile as _tempfile
+    from pathlib import Path as _Path
+    tmp = _Path(_tempfile.mkdtemp())
+    real = approval_web.config.LOG_DIR
+    try:
+        (tmp / "events.jsonl").write_text("\n".join([
+            _json.dumps({"kind": "request", "pid": 7, "request_id": 3,
+                         "tool": "trmm_run_command", "ts": "2026-01-01T09:00:00",
+                         "epoch": 1, "method": "tools/call",
+                         "arguments": '{"agent":"PC-Z","command":"whoami","shell":"cmd"}'}),
+            _json.dumps({"kind": "response", "pid": 7, "request_id": 3,
+                         "tool": "trmm_run_command", "ts": "2026-01-01T09:00:01",
+                         "epoch": 2, "method": "tools/call", "ok": True,
+                         "duration_ms": 12,
+                         "result": '{"output":"NT AUTHORITY\\\\SYSTEM"}'}),
+        ]) + "\n")
+        approval_web.config.LOG_DIR = tmp
+
+        events, _, index = approval_web._load_events((), "", 50)
+        check("the index pairs a request with its response",
+              index.get((7, 3), {}).keys() >= {"request", "response"},
+              str(list(index)))
+
+        req_event = [e for e in events if e["kind"] == "request"][0]
+        detail = approval_web._event_detail(req_event, index[(7, 3)]["response"])
+        check("opening a request shows the verbatim command",
+              "whoami" in detail and "Command" in detail)
+        check("opening a request also shows what the machine returned",
+              "SYSTEM" in detail and "What the machine returned" in detail)
+        check("and how it ended", "RAN" in detail)
+
+        # Filtering to requests only must not hide the paired response.
+        only_req, _, idx2 = approval_web._load_events(("request",), "", 50)
+        check("a filtered view can still reach its partner",
+              idx2.get((7, 3), {}).get("response") is not None)
+    finally:
+        approval_web.config.LOG_DIR = real
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+    # --- fact values come from the log, so they get the full treatment -------
+    rows = approval_web._fact_rows([["Service", "Spool\u202eer"],
+                                    ["Note", "<b>x</b>"]])
+    check("a bidi override in a fact value is unmasked",
+          "\u202e" not in rows and "202E" in rows)
+    check("markup in a fact value cannot become markup",
+          "<b>x</b>" not in rows and "&lt;b&gt;" in rows)
+
     # --- the way in ---------------------------------------------------------
     index = (await_index := asyncio.run(
         approval_web.index(make_request(cookie=session)))).body.decode()

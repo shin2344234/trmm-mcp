@@ -700,6 +700,16 @@ command: bidi overrides, zero-width and control characters are rendered as
 visible markers like `⟦202E⟧` rather than being obeyed. A logged command cannot
 reorder itself into looking harmless on the page you use to audit it.
 
+Each row opens. Clicking one expands it to the long form: for an execution
+that means the verbatim command, the facts (shell, privilege, timeout), how it
+ended, and what the machine printed — reconstructed by pairing the request with
+its response. Every row also carries the raw JSON record underneath. It uses
+`<details>`, so there is no JavaScript involved and it works with the keyboard.
+
+Filtering does not break the pairing: the correlation index is built from every
+scanned line rather than the filtered subset, so narrowing to "Tool calls" still
+shows you the response that says what the call did.
+
 ### Reviewing what was run
 
 `/approve/commands` — linked from the approval page as **Review commands run** —
