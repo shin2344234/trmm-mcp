@@ -851,6 +851,10 @@ gate. The classification lives in two small sets in `server.py`
 (`_DESTRUCTIVE_TOOLS` / `_SAFE_WRITE_TOOLS`), applied after registration, so
 adding a tool means adding one line there, not editing a decorator.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 AGPL-3.0-or-later (`LICENSE`), with per-file SPDX headers. The copyleft terms

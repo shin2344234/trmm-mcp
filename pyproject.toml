@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trmm-mcp"
-version = "1.0.1"
+version = "1.1.0"
 description = "An MCP server for TacticalRMM, with an out-of-band human approval gate for privileged actions."
 readme = "README.md"
 requires-python = ">=3.11"
